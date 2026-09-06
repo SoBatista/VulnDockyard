@@ -1604,11 +1604,40 @@ class Runtime:
             return
         candidate = self._adopt_journaled_candidate(lab, journal.candidate)
         if journal.phase == "ready" and candidate.manifest_identity == lab.manifest_identity:
-            self._assert_no_orphans(lab.manifest.id, candidate, coexisting=(journal.previous,))
-            self.store.save(candidate)
-            self._cleanup(journal.previous, coexisting=(candidate,))
-            self.store.delete_update(lab.manifest.id)
-            return
+            try:
+                self._assert_no_orphans(lab.manifest.id, candidate, coexisting=(journal.previous,))
+                status = self._status_from_state(lab, candidate)
+                inspections = self._validate_state(candidate, lab=lab, enforce_policy=True)
+                running_roles = {
+                    self.docker._labels(record.kind, inspection).get(ROLE)
+                    for record, inspection in zip(candidate.resources, inspections, strict=True)
+                    if record.kind == "container" and self._running(inspection)
+                }
+                if not (
+                    status.lock_match
+                    and status.trusted_run
+                    and self._complete_layout(lab, candidate, inspections)
+                    and running_roles == set(journal.running_roles)
+                ):
+                    raise PreflightError(
+                        "ready update candidate no longer matches its preserved state"
+                    )
+                if running_roles == {"application", "gateway"}:
+                    policy = candidate.runtime_policy
+                    if policy is None:  # pragma: no cover - journal parsing requires it
+                        raise IntegrityError("candidate lost its health policy snapshot")
+                    self._health_snapshot(policy, candidate.host_port)
+            except VulnDockyardError:
+                # Cleanup-only commands never repair, create, or start a rollback.
+                # Fall through to discard the candidate while retaining every
+                # still-present prior resource. Ownership drift in either side
+                # still makes that scoped cleanup fail closed.
+                pass
+            else:
+                self.store.save(candidate)
+                self._cleanup(journal.previous, coexisting=(candidate,))
+                self.store.delete_update(lab.manifest.id)
+                return
 
         previous = self._adopt_rollback_gateway(journal.previous, validate_policy=False)
         previous = self._adopt_rollback_seeder(previous, validate_policy=False)

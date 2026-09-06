@@ -1700,6 +1700,65 @@ def test_ready_journal_policy_drift_restores_previous_before_discarding_it(
     assert value._status(lab).state == "running"
 
 
+@pytest.mark.parametrize("operation", ["stop", "remove", "purge"])
+@pytest.mark.parametrize("damage", ["missing", "relabeled"])
+def test_cleanup_recovery_never_discards_previous_for_a_degraded_ready_candidate(
+    xdg_paths: Paths,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    damage: str,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    original_cleanup = value._cleanup
+
+    def interrupt_old_cleanup(state: RunState, *, coexisting: tuple[RunState, ...] = ()) -> None:
+        if state.run_id == previous.run_id:
+            raise PreflightError("synthetic cleanup interruption")
+        original_cleanup(state, coexisting=coexisting)
+
+    monkeypatch.setattr(value, "_cleanup", interrupt_old_cleanup)
+    with pytest.raises(PreflightError, match="cleanup interruption"):
+        value.activate_reviewed_update(lab)
+    journal = value.store.load_update(lab.manifest.id)
+    assert journal is not None and journal.phase == "ready"
+    candidate = journal.candidate
+    application = next(record for record in candidate.resources if record.name.endswith("-app"))
+    surviving_previous_ids = {
+        record.object_id
+        for record in previous.resources
+        if docker.exists(record.kind, record.object_id)
+    }
+    if damage == "missing":
+        docker.remove(application)
+    else:
+        docker.objects[application.object_id]["Config"]["Labels"][MANIFEST] = "f" * 64
+    monkeypatch.setattr(value, "_cleanup", original_cleanup)
+
+    if damage == "relabeled":
+        with pytest.raises(PolicyError, match="ownership labels mismatch"):
+            getattr(value, operation)(lab)
+        assert surviving_previous_ids.issubset(docker.objects)
+        assert value.store.load_update(lab.manifest.id) is not None
+        docker.objects[application.object_id]["Config"]["Labels"][MANIFEST] = (
+            candidate.manifest_identity
+        )
+        assert value.remove(lab).state == "absent"
+    else:
+        result = getattr(value, operation)(lab)
+        if operation == "stop":
+            restored = value.store.load(lab.manifest.id)
+            assert result.state == "degraded"
+            assert restored is not None and restored.run_id == previous.run_id
+            assert surviving_previous_ids.issubset(docker.objects)
+            assert value.remove(lab).state == "absent"
+        else:
+            assert result.state == "absent"
+        assert value.store.load_update(lab.manifest.id) is None
+    assert docker.objects == {}
+
+
 def test_ready_journal_retains_evidence_when_transactional_restore_fails(
     xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
