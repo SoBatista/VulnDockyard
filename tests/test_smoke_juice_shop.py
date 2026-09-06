@@ -3,11 +3,13 @@ from __future__ import annotations
 import http.client
 import json
 import os
+from pathlib import Path
 
 import pytest
 
-from vulndockyard.catalogue import Catalogue
+from vulndockyard.catalogue import Catalogue, ReviewedLab, identity, template_identity
 from vulndockyard.docker import GATEWAY_MODE_IPV4, ROLE, Docker
+from vulndockyard.errors import PreflightError
 from vulndockyard.paths import Paths
 from vulndockyard.runtime import Runtime, port_available
 
@@ -73,12 +75,45 @@ def _register_and_login(port: int, email: str) -> None:
     assert status == 200 and b"authentication" in body
 
 
-def test_juice_shop_complete_behavioral_equivalence(xdg_paths: Paths) -> None:
+def _reviewed_prior(candidate: ReviewedLab, root: Path) -> ReviewedLab:
+    manifest = json.loads(json.dumps(candidate.manifest.raw))
+    manifest["description"] += " Test-only prior reviewed metadata revision."
+    manifest_root = root / "manifests"
+    lock_root = root / "locks"
+    manifest_root.mkdir(mode=0o700, parents=True)
+    lock_root.mkdir(mode=0o700)
+    (manifest_root / "juice-shop.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (lock_root / "juice-shop.lock.json").write_text(
+        json.dumps(candidate.lock.raw, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    prior = Catalogue(root=root).get("juice-shop")
+    assert prior.manifest_identity == identity(prior.manifest.raw)
+    assert prior.manifest_identity != candidate.manifest_identity
+    assert prior.manifest.images == candidate.manifest.images
+    assert prior.lock.images == candidate.lock.images
+    assert template_identity(prior.manifest) == template_identity(candidate.manifest)
+    assert prior.lock.template_sha256 == candidate.lock.template_sha256
+    return prior
+
+
+def test_juice_shop_complete_behavioral_equivalence(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     port = int(os.environ.get("VDY_SMOKE_PORT", "18089"))
+    update_port = int(os.environ.get("VDY_SMOKE_UPDATE_PORT", "18090"))
     assert port_available(port), f"required explicit smoke port is busy: {port}"
+    assert update_port != port
+    assert port_available(update_port), f"required update smoke port is busy: {update_port}"
     lab = Catalogue().get("juice-shop")
+    previous_lab = _reviewed_prior(lab, tmp_path / "prior-catalogue")
     docker = Docker()
-    runtime = Runtime(paths=xdg_paths, docker=docker)
+    runtime = Runtime(
+        paths=xdg_paths,
+        docker=docker,
+        temporary_port_selector=lambda excluded: update_port,
+    )
     assert all(not values for values in runtime.residual_audit().values())
     try:
         started = runtime.up(lab, host_port=port)
@@ -162,8 +197,73 @@ def test_juice_shop_complete_behavioral_equivalence(xdg_paths: Paths) -> None:
         assert login_status in {401, 403}
         assert runtime.remove(lab).state == "absent"
         assert runtime.remove(lab).state == "absent"
+
+        rollback_base = runtime.up(previous_lab, host_port=port)
+        rollback_state = runtime.store.load(lab.manifest.id)
+        assert rollback_state is not None
+        previous_gateway = next(
+            record for record in rollback_state.resources if record.name.endswith("-gateway")
+        )
+        stable_resources = {
+            record.object_id
+            for record in rollback_state.resources
+            if not record.name.endswith("-gateway")
+        }
+        checked_ports: list[int] = []
+        candidate_ids: set[tuple[str, str]] = set()
+        real_health = runtime._health
+
+        def fail_final_candidate(selected: ReviewedLab, checked_port: int) -> None:
+            checked_ports.append(checked_port)
+            if checked_port == port:
+                journal = runtime.store.load_update(lab.manifest.id)
+                assert journal is not None and journal.phase == "cutover"
+                candidate_ids.update(
+                    (record.kind, record.object_id) for record in journal.candidate.resources
+                )
+                raise PreflightError("injected final-port candidate identity failure")
+            real_health(selected, checked_port)
+
+        monkeypatch.setattr(runtime, "_health", fail_final_candidate)
+        with pytest.raises(PreflightError, match="injected final-port"):
+            runtime.activate_reviewed_update(lab)
+        monkeypatch.setattr(runtime, "_health", real_health)
+        assert checked_ports == [update_port, port]
+        restored = runtime.store.load(lab.manifest.id)
+        assert restored is not None
+        assert restored.run_id == rollback_base.run_id
+        assert restored.manifest_identity == previous_lab.manifest_identity
+        assert stable_resources.issubset({record.object_id for record in restored.resources})
+        restored_gateway = next(
+            record for record in restored.resources if record.name.endswith("-gateway")
+        )
+        assert restored_gateway.object_id != previous_gateway.object_id
+        assert candidate_ids
+        assert all(not docker.exists(kind, object_id) for kind, object_id in candidate_ids)
+        assert runtime.store.load_update(lab.manifest.id) is None
+        assert runtime.verify(previous_lab).lock_match
+        _assert_training_functionality(port)
+        assert port_available(update_port)
+
+        restored_resources = tuple(restored.resources)
+        activated = runtime.activate_reviewed_update(lab)
+        assert activated.outcome == "activated"
+        assert activated.previous_manifest_identity == previous_lab.manifest_identity
+        assert activated.candidate_manifest_identity == lab.manifest_identity
+        assert activated.previous_run_id == rollback_base.run_id
+        assert activated.active_run_id != rollback_base.run_id
+        assert all(
+            not docker.exists(record.kind, record.object_id) for record in restored_resources
+        )
+        assert runtime.verify(lab).lock_match
+        _assert_training_functionality(port)
+        assert port_available(update_port)
+        assert runtime.remove(lab).state == "absent"
     finally:
         # This cleanup remains ownership-validated and bounded.
         runtime.remove(lab)
     assert runtime.store.load(lab.manifest.id) is None
+    assert runtime.store.load_update(lab.manifest.id) is None
+    assert port_available(port)
+    assert port_available(update_port)
     assert all(not values for values in runtime.residual_audit().values())
