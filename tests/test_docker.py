@@ -166,7 +166,7 @@ def gateway_inspection(
             ),
             "LogConfig": {
                 "Type": "local",
-                "Config": {"max-file": "2", "max-size": "10m"},
+                "Config": {"compress": "true", "max-file": "2", "max-size": "10m"},
             },
         },
         "Mounts": [],
@@ -218,10 +218,81 @@ def application_inspection(
             "Tmpfs": tmpfs or {},
             "LogConfig": {
                 "Type": "local",
-                "Config": {"max-file": "2", "max-size": "10m"},
+                "Config": {"compress": "true", "max-file": "2", "max-size": "10m"},
             },
         },
-        "Mounts": mounts or [],
+        "Mounts": (mounts or [])
+        + [
+            {
+                "Type": "tmpfs",
+                "Source": "",
+                "Destination": path,
+                "Mode": "",
+                "RW": True,
+                "Propagation": "",
+            }
+            for path in (tmpfs or {})
+        ],
+    }
+
+
+def seeder_inspection(
+    value: Ownership,
+    volume: ResourceRecord,
+    mount: EphemeralMount,
+    *,
+    image: str = "registry.example.test/app@sha256:" + "1" * 64,
+) -> dict[str, object]:
+    payload = json.dumps(
+        [{"source": mount.container_path, "target": f"/vdy-seed/{mount.name}"}],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        "Id": "a" * 64,
+        "Name": "/vdy-juice-shop-cccccccccccc-seeder",
+        "Config": {
+            "Image": image,
+            "User": "65532:65532",
+            "Entrypoint": ["/nodejs/bin/node"],
+            "Cmd": ["-e", SEED_SCRIPT, payload],
+            "Labels": role_labels(value, "seeder"),
+        },
+        "HostConfig": {
+            "NetworkMode": "none",
+            "PortBindings": {},
+            "PublishAllPorts": False,
+            "ReadonlyRootfs": True,
+            "Privileged": False,
+            "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+            "PidMode": "",
+            "IpcMode": "private",
+            "UsernsMode": "",
+            "CapDrop": ["ALL"],
+            "CapAdd": None,
+            "SecurityOpt": ["no-new-privileges=true"],
+            "Devices": [],
+            "DeviceRequests": None,
+            "Memory": 128 * 1024 * 1024,
+            "MemorySwap": 128 * 1024 * 1024,
+            "NanoCpus": 250_000_000,
+            "PidsLimit": 64,
+            "Tmpfs": None,
+            "LogConfig": {
+                "Type": "local",
+                "Config": {"compress": "true", "max-file": "2", "max-size": "10m"},
+            },
+        },
+        "Mounts": [
+            {
+                "Type": "volume",
+                "Name": volume.name,
+                "Destination": f"/vdy-seed/{mount.name}",
+                "RW": True,
+            }
+        ],
+        "NetworkSettings": {"Networks": {"none": {"NetworkID": "", "EndpointID": ""}}},
+        "State": {"Running": False},
     }
 
 
@@ -275,6 +346,7 @@ def test_application_command_has_containment_and_no_publication() -> None:
     assert [call[index + 1] for index, value in enumerate(call) if value == "--log-opt"] == [
         "max-size=10m",
         "max-file=2",
+        "compress=true",
     ]
     assert "--privileged" not in call
     assert runner.environments[-1] == fake_connection().environment()
@@ -419,7 +491,7 @@ def test_application_policy_rejects_effective_containment_drift() -> None:
 
     unexpected = application_inspection(ownership())
     unexpected["Mounts"] = [{"Type": "volume", "Name": "other", "Destination": "/data", "RW": True}]
-    with pytest.raises(PolicyError, match="volume mounts differ"):
+    with pytest.raises(PolicyError, match="mount inventory differs"):
         validate(unexpected)
 
 
@@ -433,7 +505,7 @@ def test_seeded_volume_uses_exact_tmpfs_driver_options_and_identity() -> None:
         "Options": {
             "type": "tmpfs",
             "device": "tmpfs",
-            "o": "size=64m,uid=65532,gid=65532,mode=0700",
+            "o": "size=64m,uid=65532,gid=65532,mode=0700,noexec,nosuid,nodev",
         },
         "Labels": role_labels(value, "volume-data"),
     }
@@ -453,7 +525,7 @@ def test_seeded_volume_uses_exact_tmpfs_driver_options_and_identity() -> None:
     assert [create[index + 1] for index, item in enumerate(create) if item == "--opt"] == [
         "type=tmpfs",
         "device=tmpfs",
-        "o=size=64m,uid=65532,gid=65532,mode=0700",
+        "o=size=64m,uid=65532,gid=65532,mode=0700,noexec,nosuid,nodev",
     ]
 
 
@@ -483,7 +555,6 @@ def test_seeded_volume_policy_mismatch_removes_only_validated_volume() -> None:
 
 def test_seeder_uses_locked_image_fixed_node_script_and_strict_containment() -> None:
     runner = RecordingRunner()
-    docker = Docker(runner, connection=fake_connection())
     volume = ResourceRecord(
         "volume",
         "vdy-juice-shop-cccccccccccc-volume-data",
@@ -491,6 +562,16 @@ def test_seeder_uses_locked_image_fixed_node_script_and_strict_containment() -> 
     )
     mount = EphemeralMount("data", "/juice-shop/data", 64)
     image = "registry.example.test/app@sha256:" + "1" * 64
+    runner.responses = [
+        Result(("docker",), 0, "a" * 64 + "\n", ""),
+        Result(
+            ("docker",),
+            0,
+            json.dumps([seeder_inspection(ownership(), volume, mount, image=image)]),
+            "",
+        ),
+    ]
+    docker = Docker(runner, connection=fake_connection())
 
     docker.create_seeder(
         name="vdy-juice-shop-cccccccccccc-seeder",
@@ -501,7 +582,7 @@ def test_seeder_uses_locked_image_fixed_node_script_and_strict_containment() -> 
         gid=65532,
     )
 
-    call = runner.calls[-1]
+    call = next(call for call in runner.calls if call[3:5] == ("container", "create"))
     assert call[call.index("--network") + 1] == "none"
     assert call[call.index("--user") + 1] == "65532:65532"
     assert call[call.index("--entrypoint") + 1] == "/nodejs/bin/node"
@@ -517,6 +598,110 @@ def test_seeder_uses_locked_image_fixed_node_script_and_strict_containment() -> 
         "compress=true",
     ]
     assert "--privileged" not in call
+
+
+def test_seeder_policy_mismatch_removes_only_exact_validated_container() -> None:
+    volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+    )
+    mount = EphemeralMount("data", "/juice-shop/data", 64)
+    inspection = seeder_inspection(ownership(), volume, mount)
+    assert isinstance(inspection["HostConfig"], dict)
+    inspection["HostConfig"]["NetworkMode"] = "host"
+    runner = RecordingRunner()
+    runner.responses = [
+        Result(("docker",), 0, "a" * 64 + "\n", ""),
+        Result(("docker",), 0, json.dumps([inspection]), ""),
+    ]
+    docker = Docker(runner, connection=fake_connection())
+
+    with pytest.raises(PolicyError, match="unsafe core runtime"):
+        docker.create_seeder(
+            name="vdy-juice-shop-cccccccccccc-seeder",
+            image="registry.example.test/app@sha256:" + "1" * 64,
+            ownership=ownership(),
+            seeded_mounts=((volume, mount),),
+            uid=65532,
+            gid=65532,
+        )
+
+    assert runner.calls[-1][3:] == ("container", "rm", "--force", "a" * 64)
+
+
+def test_seeder_policy_rejects_any_effective_network_attachment() -> None:
+    volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+    )
+    mount = EphemeralMount("data", "/juice-shop/data", 64)
+    inspection = seeder_inspection(ownership(), volume, mount)
+    settings = inspection["NetworkSettings"]
+    assert isinstance(settings, dict)
+    settings["Networks"] = {"foreign": {"NetworkID": "f" * 64}}
+
+    with pytest.raises(PolicyError, match="exact null-network attachment"):
+        Docker.validate_seeder_policy(
+            inspection,
+            image="registry.example.test/app@sha256:" + "1" * 64,
+            seeded_mounts=((volume, mount),),
+            uid=65532,
+            gid=65532,
+        )
+
+
+@pytest.mark.parametrize(
+    ("running", "network_id", "endpoint_id"),
+    (
+        (False, "", ""),
+        (False, "d" * 64, ""),
+        (True, "d" * 64, "e" * 64),
+    ),
+)
+def test_seeder_policy_accepts_exact_none_attachment_lifecycle_forms(
+    running: bool, network_id: str, endpoint_id: str
+) -> None:
+    volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+    )
+    mount = EphemeralMount("data", "/juice-shop/data", 64)
+    inspection = seeder_inspection(ownership(), volume, mount)
+    inspection["State"] = {"Running": running}
+    inspection["NetworkSettings"] = {
+        "Networks": {"none": {"NetworkID": network_id, "EndpointID": endpoint_id}}
+    }
+
+    Docker.validate_seeder_policy(
+        inspection,
+        image="registry.example.test/app@sha256:" + "1" * 64,
+        seeded_mounts=((volume, mount),),
+        uid=65532,
+        gid=65532,
+    )
+
+
+def test_seeder_policy_rejects_none_attachment_ids_inconsistent_with_running_state() -> None:
+    volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+    )
+    mount = EphemeralMount("data", "/juice-shop/data", 64)
+    inspection = seeder_inspection(ownership(), volume, mount)
+    inspection["State"] = {"Running": True}
+
+    with pytest.raises(PolicyError, match="exact null-network attachment"):
+        Docker.validate_seeder_policy(
+            inspection,
+            image="registry.example.test/app@sha256:" + "1" * 64,
+            seeded_mounts=((volume, mount),),
+            uid=65532,
+            gid=65532,
+        )
 
 
 def test_gateway_command_binds_only_loopback_and_fixed_target() -> None:
@@ -544,6 +729,7 @@ def test_gateway_command_binds_only_loopback_and_fixed_target() -> None:
     assert [call[index + 1] for index, value in enumerate(call) if value == "--log-opt"] == [
         "max-size=10m",
         "max-file=2",
+        "compress=true",
     ]
     tmpfs_values = [call[index + 1] for index, value in enumerate(call) if value == "--tmpfs"]
     assert all("uid=1000,gid=1000,mode=0700" in value for value in tmpfs_values)
@@ -891,9 +1077,10 @@ def test_network_attachment_inspection_is_exact_and_fail_closed() -> None:
             json.dumps(
                 [
                     {
+                        "Id": container.object_id,
                         "NetworkSettings": {
                             "Networks": {network.name: {"NetworkID": network.object_id}}
-                        }
+                        },
                     }
                 ]
             ),
@@ -928,6 +1115,91 @@ def test_network_attachment_inspection_is_exact_and_fail_closed() -> None:
     runner.responses = [Result(("docker",), 0, json.dumps([{}]), "")]
     with pytest.raises(IntegrityError, match="network inspection is malformed"):
         docker.network_connected(network, container)
+
+
+def test_created_container_network_attachment_accepts_only_docker_unresolved_form() -> None:
+    network_id = "e" * 64
+    created = {
+        "State": {"Running": False, "Status": "created"},
+        "NetworkSettings": {"Networks": {"vdy-net": {"NetworkID": "", "EndpointID": ""}}},
+    }
+    assert Docker.container_networks(created) == {"vdy-net": ""}
+
+    for status, endpoint in (("exited", ""), ("created", "f" * 64)):
+        malformed = {
+            "State": {"Running": False, "Status": status},
+            "NetworkSettings": {"Networks": {"vdy-net": {"NetworkID": "", "EndpointID": endpoint}}},
+        }
+        with pytest.raises(IntegrityError, match="unresolved network attachment"):
+            Docker.container_networks(malformed)
+
+    resolved = {
+        "State": {"Running": False, "Status": "exited"},
+        "NetworkSettings": {"Networks": {"vdy-net": {"NetworkID": network_id, "EndpointID": ""}}},
+    }
+    assert Docker.container_networks(resolved) == {"vdy-net": network_id}
+
+
+def test_configured_network_consumers_include_stopped_and_dangling_attachments() -> None:
+    runner = RecordingRunner()
+    docker = Docker(runner, connection=fake_connection())
+    network = ResourceRecord("network", "vdy-net", "e" * 64)
+    attached = "a" * 64
+    dangling = "b" * 64
+    unrelated = "c" * 64
+    runner.responses = [
+        Result(("docker",), 0, f"{attached}\n{dangling}\n{unrelated}\n", ""),
+        Result(
+            ("docker",),
+            0,
+            json.dumps(
+                [
+                    {
+                        "Id": attached,
+                        "NetworkSettings": {
+                            "Networks": {network.name: {"NetworkID": network.object_id}}
+                        },
+                    }
+                ]
+            ),
+            "",
+        ),
+        Result(
+            ("docker",),
+            0,
+            json.dumps(
+                [
+                    {
+                        "Id": dangling,
+                        "NetworkSettings": {"Networks": {network.name: {"NetworkID": ""}}},
+                    }
+                ]
+            ),
+            "",
+        ),
+        Result(
+            ("docker",),
+            0,
+            json.dumps(
+                [
+                    {
+                        "Id": unrelated,
+                        "NetworkSettings": {"Networks": {"none": {"NetworkID": ""}}},
+                    }
+                ]
+            ),
+            "",
+        ),
+    ]
+
+    assert docker.configured_network_consumers(network) == {attached, dangling}
+    assert runner.calls[0][-5:] == (
+        "container",
+        "ls",
+        "--all",
+        "--no-trunc",
+        "--quiet",
+    )
 
 
 @pytest.mark.parametrize(

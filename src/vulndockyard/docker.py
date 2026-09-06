@@ -503,6 +503,8 @@ class Docker:
             "max-size=10m",
             "--log-opt",
             "max-file=2",
+            "--log-opt",
+            "compress=true",
             "--security-opt",
             "no-new-privileges=true",
             "--cap-drop",
@@ -636,13 +638,15 @@ class Docker:
             raise PolicyError("Docker application tmpfs mounts differ from the reviewed values")
         if host.get("LogConfig") != {
             "Type": "local",
-            "Config": {"max-file": "2", "max-size": "10m"},
+            "Config": {"compress": "true", "max-file": "2", "max-size": "10m"},
         }:
             raise PolicyError("Docker application log limits differ from the reviewed values")
         expected_volumes = {
             (volume.name, mount.container_path, True) for volume, mount in seeded_mounts
         }
+        expected_tmpfs_mounts = {(mount.container_path, True) for mount in empty_mounts}
         actual_volumes: set[tuple[str, str, bool]] = set()
+        actual_tmpfs_mounts: set[tuple[str, bool]] = set()
         for mount in mounts:
             if not isinstance(mount, dict):
                 raise IntegrityError("Docker application mount inspection is malformed")
@@ -650,16 +654,20 @@ class Docker:
             name = mount.get("Name")
             destination = mount.get("Destination")
             writable = mount.get("RW")
-            if (
-                mount_type != "volume"
-                or not isinstance(name, str)
-                or not isinstance(destination, str)
-                or not isinstance(writable, bool)
-            ):
+            if not isinstance(destination, str) or not isinstance(writable, bool):
                 raise PolicyError("Docker application has an unreviewed filesystem mount")
-            actual_volumes.add((name, destination, writable))
-        if len(actual_volumes) != len(mounts) or actual_volumes != expected_volumes:
-            raise PolicyError("Docker application volume mounts differ from the reviewed values")
+            if mount_type == "volume" and isinstance(name, str):
+                actual_volumes.add((name, destination, writable))
+            elif mount_type == "tmpfs":
+                actual_tmpfs_mounts.add((destination, writable))
+            else:
+                raise PolicyError("Docker application has an unreviewed filesystem mount")
+        if (
+            len(actual_volumes) + len(actual_tmpfs_mounts) != len(mounts)
+            or actual_volumes != expected_volumes
+            or actual_tmpfs_mounts not in (set(), expected_tmpfs_mounts)
+        ):
+            raise PolicyError("Docker application mount inventory differs from the reviewed values")
 
     @staticmethod
     def _validate_ephemeral_mount(mount: EphemeralMount) -> None:
@@ -713,7 +721,10 @@ class Docker:
         return {
             "type": "tmpfs",
             "device": "tmpfs",
-            "o": f"size={mount.size_mb}m,uid={uid},gid={gid},mode={EPHEMERAL_MODE}",
+            "o": (
+                f"size={mount.size_mb}m,uid={uid},gid={gid},mode={EPHEMERAL_MODE},"
+                "noexec,nosuid,nodev"
+            ),
         }
 
     @classmethod
@@ -805,14 +816,7 @@ class Docker:
         self._validate_ephemeral_mounts(
             seeded_mounts=seeded_mounts, empty_mounts=(), uid=uid, gid=gid
         )
-        payload = json.dumps(
-            [
-                {"source": mount.container_path, "target": f"{SEED_ROOT}/{mount.name}"}
-                for _, mount in seeded_mounts
-            ],
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        payload = self.seeder_payload(seeded_mounts)
         args = [
             "container",
             "create",
@@ -859,7 +863,149 @@ class Docker:
         object_id = result.stdout.strip()
         if not OBJECT_ID.fullmatch(object_id):
             raise IntegrityError("Docker returned an invalid seeder container ID")
-        return ResourceRecord("container", name, object_id)
+        record = ResourceRecord("container", name, object_id)
+        inspection = self.validate_owned(record, ownership)
+        try:
+            self.validate_seeder_policy(
+                inspection,
+                image=image,
+                seeded_mounts=seeded_mounts,
+                uid=uid,
+                gid=gid,
+            )
+        except (IntegrityError, PolicyError):
+            self.remove(record)
+            raise
+        return record
+
+    @staticmethod
+    def seeder_payload(
+        seeded_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...],
+    ) -> str:
+        return json.dumps(
+            [
+                {"source": mount.container_path, "target": f"{SEED_ROOT}/{mount.name}"}
+                for _, mount in seeded_mounts
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def validate_seeder_policy(
+        cls,
+        inspection: dict[str, Any],
+        *,
+        image: str,
+        seeded_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...],
+        uid: int,
+        gid: int,
+    ) -> None:
+        cls._validate_ephemeral_mounts(
+            seeded_mounts=seeded_mounts, empty_mounts=(), uid=uid, gid=gid
+        )
+        config = inspection.get("Config")
+        host = inspection.get("HostConfig")
+        mounts = inspection.get("Mounts")
+        payload = cls.seeder_payload(seeded_mounts)
+        if (
+            not isinstance(config, dict)
+            or not isinstance(host, dict)
+            or not isinstance(mounts, list)
+        ):
+            raise IntegrityError("Docker storage seeder inspection is malformed")
+        if (
+            config.get("Image") != image
+            or config.get("User") != f"{uid}:{gid}"
+            or config.get("Entrypoint") != ["/nodejs/bin/node"]
+            or config.get("Cmd") != ["-e", SEED_SCRIPT, payload]
+        ):
+            raise PolicyError("Docker storage seeder has unexpected execution identity")
+        settings = inspection.get("NetworkSettings")
+        networks = settings.get("Networks") if isinstance(settings, dict) else None
+        null_attachment = networks.get("none") if isinstance(networks, dict) else None
+        state = inspection.get("State")
+        running = state.get("Running") if isinstance(state, dict) else None
+        network_id = null_attachment.get("NetworkID") if isinstance(null_attachment, dict) else None
+        endpoint_id = (
+            null_attachment.get("EndpointID") if isinstance(null_attachment, dict) else None
+        )
+        valid_stopped_ids = (
+            isinstance(network_id, str)
+            and (network_id == "" or OBJECT_ID.fullmatch(network_id) is not None)
+            and endpoint_id == ""
+        )
+        valid_running_ids = (
+            isinstance(network_id, str)
+            and OBJECT_ID.fullmatch(network_id) is not None
+            and isinstance(endpoint_id, str)
+            and OBJECT_ID.fullmatch(endpoint_id) is not None
+        )
+        if (
+            not isinstance(networks, dict)
+            or set(networks) != {"none"}
+            or not isinstance(null_attachment, dict)
+            or not isinstance(running, bool)
+            or (running and not valid_running_ids)
+            or (not running and not valid_stopped_ids)
+        ):
+            raise PolicyError("Docker storage seeder lacks its exact null-network attachment")
+        restart = host.get("RestartPolicy")
+        if (
+            host.get("NetworkMode") != "none"
+            or host.get("PortBindings") not in ({}, None)
+            or host.get("PublishAllPorts") is not False
+            or host.get("ReadonlyRootfs") is not True
+            or host.get("Privileged") is not False
+            or not isinstance(restart, dict)
+            or restart.get("Name") != "no"
+        ):
+            raise PolicyError("Docker storage seeder has unsafe core runtime configuration")
+        if (
+            any(host.get(key) not in ("", "private") for key in ("PidMode", "IpcMode"))
+            or host.get("UsernsMode") == "host"
+            or host.get("CapDrop") != ["ALL"]
+            or host.get("CapAdd") not in (None, [])
+        ):
+            raise PolicyError("Docker storage seeder has unsafe namespaces or capabilities")
+        security_options = host.get("SecurityOpt")
+        if (
+            not isinstance(security_options, list)
+            or "no-new-privileges=true" not in security_options
+            or host.get("Devices") not in (None, [])
+            or host.get("DeviceRequests") not in (None, [])
+        ):
+            raise PolicyError("Docker storage seeder lacks required privilege containment")
+        if (
+            host.get("Memory") != 128 * 1024 * 1024
+            or host.get("MemorySwap") != 128 * 1024 * 1024
+            or host.get("NanoCpus") != 250_000_000
+            or host.get("PidsLimit") != 64
+            or host.get("Tmpfs") not in ({}, None)
+            or host.get("LogConfig")
+            != {
+                "Type": "local",
+                "Config": {"compress": "true", "max-file": "2", "max-size": "10m"},
+            }
+        ):
+            raise PolicyError("Docker storage seeder resource policy differs from reviewed values")
+        expected_mounts = {
+            (volume.name, f"{SEED_ROOT}/{mount.name}", True) for volume, mount in seeded_mounts
+        }
+        actual_mounts: set[tuple[str, str, bool]] = set()
+        for mount in mounts:
+            if not isinstance(mount, dict):
+                raise IntegrityError("Docker storage seeder mount inspection is malformed")
+            values = (mount.get("Name"), mount.get("Destination"), mount.get("RW"))
+            if mount.get("Type") != "volume" or not (
+                isinstance(values[0], str)
+                and isinstance(values[1], str)
+                and isinstance(values[2], bool)
+            ):
+                raise PolicyError("Docker storage seeder has an unreviewed filesystem mount")
+            actual_mounts.add(cast(tuple[str, str, bool], values))
+        if len(actual_mounts) != len(mounts) or actual_mounts != expected_mounts:
+            raise PolicyError("Docker storage seeder mounts differ from reviewed values")
 
     def read_logs(self, record: ResourceRecord, *, timeout: float, tail: int = 20) -> Result:
         if record.kind != "container":
@@ -904,6 +1050,8 @@ class Docker:
             "max-size=10m",
             "--log-opt",
             "max-file=2",
+            "--log-opt",
+            "compress=true",
             "--publish",
             f"127.0.0.1:{host_port}:8080",
             "--user",
@@ -1032,7 +1180,7 @@ class Docker:
             raise PolicyError("Docker gateway filesystem mounts differ from the reviewed values")
         if host.get("LogConfig") != {
             "Type": "local",
-            "Config": {"max-file": "2", "max-size": "10m"},
+            "Config": {"compress": "true", "max-file": "2", "max-size": "10m"},
         }:
             raise PolicyError("Docker gateway log limits differ from the reviewed values")
 
@@ -1048,16 +1196,100 @@ class Docker:
         if network.kind != "network" or container.kind != "container":
             raise ValueError("network inspection requires a network and container record")
         inspection = self.inspect("container", container.object_id)
+        networks = self.container_networks(inspection)
+        if network.name not in networks:
+            return False
+        attached_id = networks[network.name]
+        if attached_id and attached_id != network.object_id:
+            raise PolicyError("Docker container network attachment identity differs from state")
+        return True
+
+    @staticmethod
+    def container_networks(inspection: dict[str, Any]) -> dict[str, str]:
         settings = inspection.get("NetworkSettings")
         networks = settings.get("Networks") if isinstance(settings, dict) else None
         if not isinstance(networks, dict):
             raise IntegrityError("Docker container network inspection is malformed")
-        attachment = networks.get(network.name)
-        if attachment is None:
-            return False
-        if not isinstance(attachment, dict) or attachment.get("NetworkID") != network.object_id:
-            raise PolicyError("Docker container network attachment identity differs from state")
-        return True
+        state = inspection.get("State")
+        created = (
+            isinstance(state, dict)
+            and state.get("Running") is False
+            and state.get("Status") == "created"
+        )
+        result: dict[str, str] = {}
+        for name, attachment in networks.items():
+            if (
+                not isinstance(name, str)
+                or not isinstance(attachment, dict)
+                or not isinstance(attachment.get("NetworkID"), str)
+            ):
+                raise IntegrityError("Docker container network attachment is malformed")
+            network_id = attachment["NetworkID"]
+            if network_id:
+                if not OBJECT_ID.fullmatch(network_id):
+                    raise IntegrityError("Docker container network attachment is malformed")
+            elif not created or attachment.get("EndpointID") != "":
+                raise IntegrityError(
+                    "Docker reports an unresolved network attachment outside created state"
+                )
+            result[name] = network_id
+        return result
+
+    @staticmethod
+    def validate_network_endpoints(
+        inspection: dict[str, Any], *, expected_container_ids: set[str]
+    ) -> None:
+        raw = inspection.get("Containers")
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict) or any(
+            not isinstance(object_id, str) or not OBJECT_ID.fullmatch(object_id)
+            for object_id in raw
+        ):
+            raise IntegrityError("Docker network endpoint inspection is malformed")
+        actual = set(raw)
+        if actual != expected_container_ids:
+            raise PolicyError("Docker network endpoints differ from the exact managed topology")
+
+    def configured_network_consumers(self, network: ResourceRecord) -> set[str]:
+        """Return all containers, including stopped ones, configured for a network."""
+        if (
+            network.kind != "network"
+            or not RESOURCE_NAME.fullmatch(network.name)
+            or not OBJECT_ID.fullmatch(network.object_id)
+        ):
+            raise IntegrityError("recorded Docker network identity is malformed")
+        response = self._run(
+            ("container", "ls", "--all", "--no-trunc", "--quiet"),
+            timeout=self.timeouts.inspect,
+        )
+        container_ids = tuple(line for line in response.stdout.splitlines() if line)
+        if len(set(container_ids)) != len(container_ids) or any(
+            not OBJECT_ID.fullmatch(object_id) for object_id in container_ids
+        ):
+            raise IntegrityError("Docker returned malformed container inventory")
+        consumers: set[str] = set()
+        for object_id in container_ids:
+            inspection = self.inspect("container", object_id)
+            if inspection.get("Id") != object_id:
+                raise IntegrityError(
+                    "Docker container inventory identity changed during inspection"
+                )
+            settings = inspection.get("NetworkSettings")
+            attachments = settings.get("Networks") if isinstance(settings, dict) else None
+            if not isinstance(attachments, dict):
+                raise IntegrityError("Docker container network inspection is malformed")
+            for name, attachment in attachments.items():
+                if not isinstance(name, str) or not isinstance(attachment, dict):
+                    raise IntegrityError("Docker container network attachment is malformed")
+                attached_id = attachment.get("NetworkID")
+                if not isinstance(attached_id, str) or (
+                    attached_id and not OBJECT_ID.fullmatch(attached_id)
+                ):
+                    raise IntegrityError("Docker container network attachment is malformed")
+                if attached_id == network.object_id or (not attached_id and name == network.name):
+                    consumers.add(object_id)
+        return consumers
 
     def start(self, record: ResourceRecord) -> None:
         if record.kind != "container":
