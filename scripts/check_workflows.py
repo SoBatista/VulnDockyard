@@ -193,6 +193,17 @@ def check() -> None:
                 failures.append("release.yml: publish job may run only the stdlib publisher")
             if "push" in event_names or "pull_request" in event_names:
                 failures.append("release.yml: development events must never publish")
+        if path.name == "release-metadata.yml":
+            metadata_text = str(jobs.get("validate", {}))
+            for required in (
+                "scripts/check_release_metadata.py",
+                "scripts/check_dco.py",
+                "github.event.pull_request.base.sha",
+            ):
+                if required not in metadata_text:
+                    failures.append(
+                        f"release-metadata.yml: validation job lacks required check: {required}"
+                    )
         text = path.read_text(encoding="utf-8")
         if path.name == "ci.yml":
             quality = jobs.get("quality", {})

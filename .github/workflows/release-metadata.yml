@@ -30,3 +30,7 @@ jobs:
           VDY_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           VDY_PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python scripts/check_release_metadata.py
+      - name: Validate every pull-request commit DCO sign-off
+        env:
+          VDY_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python scripts/check_dco.py

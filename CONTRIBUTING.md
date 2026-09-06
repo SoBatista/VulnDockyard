@@ -49,6 +49,9 @@ Signed-off-by: Your Name <your-email@example.com>
 
 Use `git commit -s`. By signing off, you certify the [DCO](DCO.md). Do not submit
 secrets, proprietary source, exploit walkthroughs, or registry credentials.
+The pull-request metadata check evaluates every commit between the live base and
+the reviewed head and requires a sign-off matching that commit's author name and
+email; a sign-off in only the final commit is insufficient.
 
 ## Adapter changes
 

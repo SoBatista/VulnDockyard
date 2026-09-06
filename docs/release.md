@@ -10,6 +10,8 @@ GitHub Release, package, or image may be published from the target state.
 `src/vulndockyard/_version.py` is authoritative. `VERSION`, package metadata,
 CLI output, README, and changelog are checked projections. Releases use SemVer,
 Keep a Changelog, reviewed PR version state, and exactly one release-impact label.
+The pull-request metadata job also checks every commit in the exact base-to-head
+range for a DCO sign-off matching its author identity.
 
 Before publication, run `scripts/self-test.sh` from a clean committed tree. It
 uses bounded per-phase and overall watchdogs and writes
