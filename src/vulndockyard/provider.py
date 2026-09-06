@@ -285,6 +285,21 @@ class VulhubProvider:
         return allowlist
 
     @staticmethod
+    def _allowlist_sha256(allowlist: dict[str, dict[str, Any]]) -> str:
+        payload = json.dumps(allowlist, sort_keys=True, separators=(",", ":")).encode()
+        return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+    @staticmethod
+    def _validate_cached_approvals(
+        entries: tuple[ProviderEntry, ...], allowlist: dict[str, dict[str, Any]]
+    ) -> None:
+        runnable = {entry.path for entry in entries if entry.status == "runnable"}
+        if runnable != set(allowlist):
+            raise IntegrityError(
+                "Vulhub cached runnable entries do not match the reviewed allowlist"
+            )
+
+    @staticmethod
     def _extract(archive: bytes, destination: Path, commit: str) -> Path:
         total = 0
         members_count = 0
@@ -373,7 +388,8 @@ class VulhubProvider:
         activated = False
         try:
             source = self._extract(archive, temporary, lock.commit)
-            entries = self._index(source)
+            allowlist = self._allowlist()
+            entries = self._index(source, allowlist=allowlist)
             final = temporary / "verified"
             source.rename(final)
             index_bytes = (
@@ -389,6 +405,7 @@ class VulhubProvider:
                         "commit": lock.commit,
                         "archive_sha256": actual,
                         "index_sha256": f"sha256:{hashlib.sha256(index_bytes).hexdigest()}",
+                        "allowlist_sha256": self._allowlist_sha256(allowlist),
                     },
                     sort_keys=True,
                     separators=(",", ":"),
@@ -418,8 +435,13 @@ class VulhubProvider:
             raise
         return entries
 
-    def _index(self, source: Path) -> tuple[ProviderEntry, ...]:
-        allowlist = self._allowlist()
+    def _index(
+        self,
+        source: Path,
+        *,
+        allowlist: dict[str, dict[str, Any]] | None = None,
+    ) -> tuple[ProviderEntry, ...]:
+        allowlist = self._allowlist() if allowlist is None else allowlist
         metadata_path = source / "environments.toml"
         try:
             if metadata_path.stat().st_size > 10_000_000:
@@ -511,6 +533,8 @@ class VulhubProvider:
                 if approved is not None and review is not None and review.accepted and not reasons
                 else "blocked"
             )
+            if approved is not None and status != "runnable":
+                raise IntegrityError(f"reviewed allowlist entry failed validation: {relative}")
             if any(not reason.isprintable() or len(reason) > 1000 for reason in reasons):
                 raise IntegrityError(f"Vulhub rejection reason is unsafe for {relative}")
             entries.append(ProviderEntry(relative, product, category, cves, status, tuple(reasons)))
@@ -526,6 +550,8 @@ class VulhubProvider:
         try:
             integrity, index_bytes = self._cache_metadata()
             entries = self._parse_entries(index_bytes)
+            allowlist = self._allowlist()
+            self._validate_cached_approvals(entries, allowlist)
         except FileNotFoundError:
             return {
                 "provider": "vulhub",
@@ -544,6 +570,7 @@ class VulhubProvider:
             "commit": lock.commit,
             "archive_sha256": lock.archive_sha256,
             "index_sha256": f"sha256:{hashlib.sha256(index_bytes).hexdigest()}",
+            "allowlist_sha256": self._allowlist_sha256(allowlist),
         }
         return {
             "provider": "vulhub",
@@ -557,6 +584,7 @@ class VulhubProvider:
         try:
             lock = load_provider_lock()
             integrity, index_bytes = self._cache_metadata()
+            allowlist = self._allowlist()
         except FileNotFoundError as exc:
             raise PolicyError("Vulhub provider is not synced; run provider sync vulhub") from exc
         except (OSError, json.JSONDecodeError, StrictJSONError) as exc:
@@ -565,10 +593,13 @@ class VulhubProvider:
             "commit": lock.commit,
             "archive_sha256": lock.archive_sha256,
             "index_sha256": f"sha256:{hashlib.sha256(index_bytes).hexdigest()}",
+            "allowlist_sha256": self._allowlist_sha256(allowlist),
         }
         if integrity != expected:
             raise IntegrityError("Vulhub provider cache integrity check failed")
-        return self._parse_entries(index_bytes)
+        entries = self._parse_entries(index_bytes)
+        self._validate_cached_approvals(entries, allowlist)
+        return entries
 
     @staticmethod
     def _parse_entries(index_bytes: bytes) -> tuple[ProviderEntry, ...]:

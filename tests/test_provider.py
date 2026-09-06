@@ -237,6 +237,7 @@ def test_provider_absent_and_malformed_cache_are_honest(xdg_paths: Paths) -> Non
                 "commit": lock.commit,
                 "archive_sha256": lock.archive_sha256,
                 "index_sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+                "allowlist_sha256": provider._allowlist_sha256(provider._allowlist()),
             }
         ),
         encoding="utf-8",
@@ -265,6 +266,51 @@ def test_provider_cache_rejects_symlinked_or_overpermissive_roots(
     provider.root.chmod(0o755)
     assert provider.status()["state"] == "stale-or-corrupt"
     with pytest.raises(IntegrityError, match="unsafe type"):
+        provider.entries()
+
+
+def test_cached_runnable_status_cannot_outlive_the_packaged_allowlist(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commit = "7" * 40
+    content = archive(commit)
+    lock = ProviderLock(
+        "https://github.com/vulhub/vulhub",
+        commit,
+        f"https://codeload.github.com/vulhub/vulhub/tar.gz/{commit}",
+        "sha256:" + hashlib.sha256(content).hexdigest(),
+        "MIT",
+    )
+    monkeypatch.setattr(provider_module, "load_provider_lock", lambda: lock)
+    monkeypatch.setattr(
+        provider_module,
+        "_open_pinned_archive",
+        lambda request, timeout: Response(content),
+    )
+    provider = VulhubProvider(xdg_paths)
+    provider.sync()
+    index = json.loads(provider.index_path.read_text(encoding="utf-8"))
+    index[0]["status"] = "runnable"
+    index[0]["reasons"] = []
+    index_bytes = (json.dumps(index, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    provider.index_path.write_bytes(index_bytes)
+    (provider.root / "integrity.json").write_text(
+        json.dumps(
+            {
+                "commit": lock.commit,
+                "archive_sha256": lock.archive_sha256,
+                "index_sha256": "sha256:" + hashlib.sha256(index_bytes).hexdigest(),
+                "allowlist_sha256": provider._allowlist_sha256(provider._allowlist()),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert provider.status()["state"] == "stale-or-corrupt"
+    with pytest.raises(IntegrityError, match="reviewed allowlist"):
         provider.entries()
 
 
