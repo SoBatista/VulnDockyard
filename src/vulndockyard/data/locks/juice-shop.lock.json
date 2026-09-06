@@ -24,17 +24,25 @@
       "role": "gateway"
     }
   ],
-  "template_sha256": "sha256:e23aa8246a26e28d6e34f76b23ea8a46044c6a7b8b4479e2f867b5472f3037ce",
+  "template_sha256": "sha256:a6387e0439c8d16db26fa473e53b46e22280560b75f32e9d4ca018fc475ddd2f",
   "source_sha256": "",
   "build_recipe_revision": "",
+  "sbom_url": "",
+  "provenance_url": "",
+  "signature_url": "",
+  "redistribution_status": "not-applicable",
+  "redistribution_evidence_url": "",
   "trust_evidence": [
     "https://github.com/juice-shop/juice-shop/blob/v20.2.0/.github/workflows/release.yml",
     "https://hub.docker.com/v2/repositories/bkimminich/juice-shop/tags/v20.2.0",
     "https://github.com/docker-library/official-images/blob/master/library/caddy",
     "https://hub.docker.com/_/caddy"
   ],
-  "verified_at": "2026-09-06T11:03:23Z",
+  "verified_at": "2026-09-06T15:36:29Z",
   "verified_platforms": [
     "linux/amd64"
+  ],
+  "verification_evidence": [
+    "github-actions-run-34042789523:head-110e12693be25768c42013461939bb8f6968b7cb:ubuntu-24.04:linux-amd64:docker-engine-minimum-28-enforced:identity-and-lifecycle-passed:2026-09-06"
   ]
 }

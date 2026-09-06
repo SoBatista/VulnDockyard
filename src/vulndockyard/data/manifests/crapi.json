@@ -106,7 +106,7 @@
       "internal_port": 80,
       "protocol": "http",
       "health_path": "/health",
-      "identity_regex": "healthy"
+      "identity_marker": "healthy"
     },
     {
       "name": "identity",
@@ -114,7 +114,7 @@
       "internal_port": 8080,
       "protocol": "http",
       "health_path": "/",
-      "identity_regex": "crAPI"
+      "identity_marker": "crAPI"
     },
     {
       "name": "community",
@@ -122,7 +122,7 @@
       "internal_port": 8087,
       "protocol": "http",
       "health_path": "/",
-      "identity_regex": "crAPI"
+      "identity_marker": "crAPI"
     },
     {
       "name": "workshop",
@@ -130,7 +130,7 @@
       "internal_port": 8000,
       "protocol": "http",
       "health_path": "/",
-      "identity_regex": "crAPI"
+      "identity_marker": "crAPI"
     },
     {
       "name": "chatbot",
@@ -138,7 +138,7 @@
       "internal_port": 5002,
       "protocol": "http",
       "health_path": "/",
-      "identity_regex": "crAPI"
+      "identity_marker": "crAPI"
     },
     {
       "name": "postgres",
@@ -146,7 +146,7 @@
       "internal_port": 5432,
       "protocol": "tcp",
       "health_path": "/",
-      "identity_regex": "PostgreSQL"
+      "identity_marker": "PostgreSQL"
     },
     {
       "name": "mongodb",
@@ -154,7 +154,7 @@
       "internal_port": 27017,
       "protocol": "tcp",
       "health_path": "/",
-      "identity_regex": "MongoDB"
+      "identity_marker": "MongoDB"
     },
     {
       "name": "chromadb",
@@ -162,7 +162,7 @@
       "internal_port": 8000,
       "protocol": "http",
       "health_path": "/api/v1/heartbeat",
-      "identity_regex": "heartbeat|nanosecond"
+      "identity_marker": "heartbeat"
     },
     {
       "name": "mailhog",
@@ -170,7 +170,7 @@
       "internal_port": 8025,
       "protocol": "http",
       "health_path": "/",
-      "identity_regex": "MailHog"
+      "identity_marker": "MailHog"
     },
     {
       "name": "dealership-gateway",
@@ -178,7 +178,7 @@
       "internal_port": 443,
       "protocol": "https",
       "health_path": "/",
-      "identity_regex": "premiumdealership|gateway"
+      "identity_marker": "premiumdealership"
     }
   ],
   "friendly_hostname": "crapi.test",
@@ -229,8 +229,8 @@
     ]
   },
   "outbound_network": {
-    "required": true,
-    "reason": "Some advertised challenges call external services.",
+    "required": false,
+    "reason": "Core services are local; optional SSRF and chatbot challenges require explicit fixtures or acknowledged egress.",
     "challenge_dependencies": [
       "SSRF challenge calls www.google.com",
       "Chatbot challenges need an LLM provider API key"

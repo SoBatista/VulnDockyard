@@ -14,9 +14,15 @@
     "template_sha256",
     "source_sha256",
     "build_recipe_revision",
+    "sbom_url",
+    "provenance_url",
+    "signature_url",
+    "redistribution_status",
+    "redistribution_evidence_url",
     "trust_evidence",
     "verified_at",
-    "verified_platforms"
+    "verified_platforms",
+    "verification_evidence"
   ],
   "$defs": {
     "strings": {
@@ -101,6 +107,30 @@
     "build_recipe_revision": {
       "type": "string"
     },
+    "sbom_url": {
+      "type": "string",
+      "pattern": "^(|https://.+)$"
+    },
+    "provenance_url": {
+      "type": "string",
+      "pattern": "^(|https://.+)$"
+    },
+    "signature_url": {
+      "type": "string",
+      "pattern": "^(|https://.+)$"
+    },
+    "redistribution_status": {
+      "enum": [
+        "not-applicable",
+        "unresolved",
+        "permitted",
+        "prohibited"
+      ]
+    },
+    "redistribution_evidence_url": {
+      "type": "string",
+      "pattern": "^(|https://.+)$"
+    },
     "trust_evidence": {
       "$ref": "#/$defs/strings"
     },
@@ -109,6 +139,9 @@
       "format": "date-time"
     },
     "verified_platforms": {
+      "$ref": "#/$defs/strings"
+    },
+    "verification_evidence": {
       "$ref": "#/$defs/strings"
     }
   }

@@ -35,7 +35,32 @@
     "status_reason": "No official remote OCI artifact exists; the pinned v3.1 Compose deployment builds the web and MySQL services from local source contexts and mutable bases."
   },
   "images": [],
-  "services": [],
+  "services": [
+    {
+      "name": "web-http",
+      "image_role": "application",
+      "internal_port": 8080,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_marker": "Security Shepherd"
+    },
+    {
+      "name": "web-https",
+      "image_role": "application",
+      "internal_port": 8443,
+      "protocol": "https",
+      "health_path": "/",
+      "identity_marker": "Security Shepherd"
+    },
+    {
+      "name": "database",
+      "image_role": "database",
+      "internal_port": 3306,
+      "protocol": "tcp",
+      "health_path": "/",
+      "identity_marker": "MySQL"
+    }
+  ],
   "friendly_hostname": "security-shepherd.test",
   "health_check": {
     "type": "http-identity-and-functionality",

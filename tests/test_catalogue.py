@@ -307,6 +307,23 @@ def test_runnable_trust_invariants_fail_closed(juice_shop: object) -> None:
     with pytest.raises(IntegrityError, match="architecture-qualified"):
         Manifest.parse(raw)
 
+    raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    raw["resources"]["read_only_root"] = False
+    with pytest.raises(IntegrityError, match="read-only root filesystem"):
+        Manifest.parse(raw)
+
+
+def test_service_identity_is_a_bounded_literal_marker(juice_shop: object) -> None:
+    raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    raw["services"][0]["identity_marker"] = "x" * 161
+    with pytest.raises(IntegrityError, match="printable literal"):
+        Manifest.parse(raw)
+
+    raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    raw["services"][0]["identity_marker"] = "unsafe\nmarker"
+    with pytest.raises(IntegrityError, match="printable literal"):
+        Manifest.parse(raw)
+
 
 def test_runnable_cannot_omit_digest(juice_shop: object) -> None:
     raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
@@ -378,6 +395,16 @@ def test_lockfile_rejects_mutable_or_unknown_content(juice_shop: object) -> None
     with pytest.raises(IntegrityError, match="unknown extra"):
         Lockfile.parse(raw)
 
+    raw = copy.deepcopy(juice_shop.lock.raw)  # type: ignore[attr-defined]
+    raw["redistribution_status"] = "claimed"
+    with pytest.raises(IntegrityError, match="redistribution_status"):
+        Lockfile.parse(raw)
+
+    raw = copy.deepcopy(juice_shop.lock.raw)  # type: ignore[attr-defined]
+    raw["sbom_url"] = "file:///tmp/sbom.json"
+    with pytest.raises(IntegrityError, match="sbom_url"):
+        Lockfile.parse(raw)
+
 
 @pytest.mark.parametrize("timestamp", ["2026-02-30T00:00:00Z", "2026-09-06", "2026-09-06T00:00:00"])
 def test_lockfile_timestamp_must_be_valid_canonical_utc(timestamp: str, juice_shop: object) -> None:
@@ -398,6 +425,37 @@ def test_catalogue_rejects_manifest_lock_mismatch(tmp_path: Path, juice_shop: ob
     (manifests / "juice-shop.json").write_text(json.dumps(raw_manifest), encoding="utf-8")
     (locks / "juice-shop.lock.json").write_text(json.dumps(raw_lock), encoding="utf-8")
     with pytest.raises(IntegrityError, match="manifest and lock images differ"):
+        Catalogue(tmp_path).all()
+
+
+def test_quarantined_digest_evidence_is_also_bound_to_its_lock(tmp_path: Path) -> None:
+    manifests = tmp_path / "manifests"
+    locks = tmp_path / "locks"
+    manifests.mkdir()
+    locks.mkdir()
+    dvwa = Catalogue().get("dvwa")
+    raw_manifest = copy.deepcopy(dvwa.manifest.raw)
+    raw_lock = copy.deepcopy(dvwa.lock.raw)
+    raw_lock["images"] = []
+    (manifests / "dvwa.json").write_text(json.dumps(raw_manifest), encoding="utf-8")
+    (locks / "dvwa.lock.json").write_text(json.dumps(raw_lock), encoding="utf-8")
+    with pytest.raises(IntegrityError, match="manifest and lock images differ"):
+        Catalogue(tmp_path).all()
+
+
+def test_upstream_signed_requires_provenance_and_signature_lock_evidence(
+    tmp_path: Path, juice_shop: object
+) -> None:
+    manifests = tmp_path / "manifests"
+    locks = tmp_path / "locks"
+    manifests.mkdir()
+    locks.mkdir()
+    raw_manifest = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    raw_manifest["trust"]["level"] = "upstream-signed"
+    raw_lock = copy.deepcopy(juice_shop.lock.raw)  # type: ignore[attr-defined]
+    (manifests / "juice-shop.json").write_text(json.dumps(raw_manifest), encoding="utf-8")
+    (locks / "juice-shop.lock.json").write_text(json.dumps(raw_lock), encoding="utf-8")
+    with pytest.raises(IntegrityError, match="lacks provenance or signature"):
         Catalogue(tmp_path).all()
 
 
@@ -451,6 +509,7 @@ def test_catalogue_binds_filenames_hostnames_and_lock_inventory(
         ("upstream_commit", "1" * 40, "versions differ"),
         ("trust_evidence", ["https://example.test/different"], "trust evidence differ"),
         ("verified_platforms", ["linux/arm64"], "verified platforms differ"),
+        ("verification_evidence", ["different smoke"], "verification evidence differ"),
         ("verified_at", "2026-09-07T00:00:00Z", "verification dates differ"),
         ("template_sha256", "sha256:" + "9" * 64, "orchestration template differs"),
     ],
@@ -483,11 +542,16 @@ def test_vulndockyard_built_requires_build_evidence_and_ghcr(
     raw_lock = copy.deepcopy(juice_shop.lock.raw)  # type: ignore[attr-defined]
     (manifests / "juice-shop.json").write_text(json.dumps(raw_manifest), encoding="utf-8")
     (locks / "juice-shop.lock.json").write_text(json.dumps(raw_lock), encoding="utf-8")
-    with pytest.raises(IntegrityError, match="lacks source or build-recipe evidence"):
+    with pytest.raises(IntegrityError, match="lacks source, build, SBOM"):
         Catalogue(tmp_path).all()
 
     raw_lock["source_sha256"] = "sha256:" + "2" * 64
     raw_lock["build_recipe_revision"] = "recipes/juice-shop@1"
+    raw_lock["sbom_url"] = "https://example.test/sbom.spdx.json"
+    raw_lock["provenance_url"] = "https://example.test/provenance.json"
+    raw_lock["signature_url"] = "https://example.test/signature"
+    raw_lock["redistribution_status"] = "permitted"
+    raw_lock["redistribution_evidence_url"] = "https://example.test/license-review"
     (locks / "juice-shop.lock.json").write_text(json.dumps(raw_lock), encoding="utf-8")
     with pytest.raises(IntegrityError, match="not hosted on GHCR"):
         Catalogue(tmp_path).all()

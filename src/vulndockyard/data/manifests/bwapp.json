@@ -34,7 +34,24 @@
     "status_reason": "No maintainer-published OCI image exists and no explicit redistribution grant was found; prohibited third-party images will not be used."
   },
   "images": [],
-  "services": [],
+  "services": [
+    {
+      "name": "web",
+      "image_role": "application",
+      "internal_port": 80,
+      "protocol": "http",
+      "health_path": "/login.php",
+      "identity_marker": "bWAPP"
+    },
+    {
+      "name": "database",
+      "image_role": "database",
+      "internal_port": 3306,
+      "protocol": "tcp",
+      "health_path": "/",
+      "identity_marker": "MySQL"
+    }
+  ],
   "friendly_hostname": "bwapp.test",
   "health_check": {
     "type": "http-identity-and-functionality",
@@ -79,8 +96,8 @@
     ]
   },
   "outbound_network": {
-    "required": true,
-    "reason": "Some advertised exercises use network protocols and external targets.",
+    "required": false,
+    "reason": "Core training is local; external-protocol exercises require explicit contained fixtures or acknowledged egress.",
     "challenge_dependencies": [
       "RFI, SSRF, DNS, SMTP, LDAP, FTP, SNMP, WebDAV, Heartbleed, and Shellshock features need supporting services"
     ]

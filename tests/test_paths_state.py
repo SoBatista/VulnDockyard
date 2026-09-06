@@ -165,7 +165,7 @@ def test_runtime_policy_snapshot_and_update_journal_fail_closed() -> None:
                 "internal_port": 3000,
                 "protocol": "http",
                 "health_path": "/",
-                "identity_regex": "OWASP Juice Shop",
+                "identity_marker": "OWASP Juice Shop",
             }
         ],
     }

@@ -76,9 +76,13 @@ class Catalogue:
             raise IntegrityError(f"cannot load reviewed data {path}: {exc}") from exc
 
     @staticmethod
-    def _validate_runnable_binding(manifest: Manifest, lock: Lockfile) -> None:
-        if manifest.images != lock.images:
-            raise IntegrityError(f"manifest and lock images differ for {manifest.id}")
+    def _validate_binding(manifest: Manifest, lock: Lockfile) -> None:
+        locked_manifest_images = tuple(image for image in manifest.images if image.digest)
+        if locked_manifest_images != lock.images:
+            raise IntegrityError(
+                f"manifest and lock images differ for {manifest.id}; only digest-pinned "
+                "manifest images belong in the immutable lock"
+            )
         if (
             manifest.version_release != lock.lab_version
             or manifest.version_tag != lock.upstream_release
@@ -89,23 +93,46 @@ class Catalogue:
             raise IntegrityError(f"manifest and lock trust evidence differ for {manifest.id}")
         if manifest.verification_platforms != lock.verified_platforms:
             raise IntegrityError(f"manifest and lock verified platforms differ for {manifest.id}")
+        if manifest.verification_evidence != lock.verification_evidence:
+            raise IntegrityError(
+                f"manifest and lock verification evidence differ for {manifest.id}"
+            )
         if manifest.last_verified != lock.verified_at.date():
             raise IntegrityError(f"manifest and lock verification dates differ for {manifest.id}")
-        if lock.template_sha256 != template_identity(manifest):
+        if (
+            manifest.adapter_status is AdapterStatus.RUNNABLE
+            and lock.template_sha256 != template_identity(manifest)
+        ):
             raise IntegrityError(
                 f"manifest orchestration template differs from lock for {manifest.id}"
             )
+        if manifest.trust is TrustLevel.UPSTREAM_SIGNED and (
+            not lock.provenance_url or not lock.signature_url
+        ):
+            raise IntegrityError(
+                f"upstream-signed lock lacks provenance or signature evidence for {manifest.id}"
+            )
         if manifest.trust is TrustLevel.VULNDOCKYARD_BUILT:
-            if not lock.source_sha256 or not lock.build_recipe_revision:
+            if (
+                not lock.source_sha256
+                or not lock.build_recipe_revision
+                or not lock.sbom_url
+                or not lock.provenance_url
+                or not lock.signature_url
+                or lock.redistribution_status != "permitted"
+                or not lock.redistribution_evidence_url
+            ):
                 raise IntegrityError(
-                    "vulndockyard-built lock lacks source or build-recipe evidence for "
+                    "vulndockyard-built lock lacks source, build, SBOM, provenance, signature, "
+                    "or redistribution evidence for "
                     f"{manifest.id}"
                 )
             application_images = tuple(
                 image for image in manifest.images if image.role == "application"
             )
             if not application_images or any(
-                not image.name.startswith("ghcr.io/") for image in application_images
+                not image.name.startswith("ghcr.io/sobatista/vulndockyard/")
+                for image in application_images
             ):
                 raise IntegrityError(
                     f"vulndockyard-built application image is not hosted on GHCR for {manifest.id}"
@@ -129,8 +156,7 @@ class Catalogue:
             lock = Lockfile.parse(self._load(lock_path))
             if lock.lab_id != manifest.id:
                 raise IntegrityError(f"lockfile lab mismatch for {manifest.id}")
-            if manifest.adapter_status is AdapterStatus.RUNNABLE:
-                self._validate_runnable_binding(manifest, lock)
+            self._validate_binding(manifest, lock)
             labs.append(ReviewedLab(manifest, lock, identity(manifest.raw)))
         ids = [lab.manifest.id for lab in labs]
         if len(ids) != len(set(ids)):

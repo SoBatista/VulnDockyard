@@ -468,9 +468,7 @@ class Runtime:
         health_timeout = min(self.docker.timeouts.health, float(policy.health_timeout_seconds))
         deadline = time.monotonic() + health_timeout
         for service in policy.services:
-            identity = service.identity_regex
-            if len(identity) > 160 or not identity.isprintable():
-                raise IntegrityError("health identity marker is unsafe")
+            identity = service.identity_marker
             last_error = "not attempted"
             request = urllib.request.Request(  # noqa: S310 - local http URL only
                 self.local_url(port, service.health_path),

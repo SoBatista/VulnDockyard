@@ -89,7 +89,7 @@
         "internal_port",
         "protocol",
         "health_path",
-        "identity_regex"
+        "identity_marker"
       ],
       "properties": {
         "name": {
@@ -117,9 +117,11 @@
           "maxLength": 512,
           "pattern": "^/(?!/)"
         },
-        "identity_regex": {
+        "identity_marker": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[ -~]+$"
         }
       }
     },
@@ -550,6 +552,13 @@
             "properties": {
               "status": {
                 "const": "passed"
+              }
+            }
+          },
+          "resources": {
+            "properties": {
+              "read_only_root": {
+                "const": true
               }
             }
           }

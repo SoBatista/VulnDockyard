@@ -7,7 +7,7 @@ import os
 import pytest
 
 from vulndockyard.catalogue import Catalogue
-from vulndockyard.docker import ROLE, Docker
+from vulndockyard.docker import GATEWAY_MODE_IPV4, ROLE, Docker
 from vulndockyard.paths import Paths
 from vulndockyard.runtime import Runtime, port_available
 
@@ -107,6 +107,11 @@ def test_juice_shop_complete_behavioral_equivalence(xdg_paths: Paths) -> None:
         )
         assert app["HostConfig"]["PortBindings"] == {}
         assert app["HostConfig"]["RestartPolicy"]["Name"] == "no"
+        expected_logs = {
+            "Type": "local",
+            "Config": {"compress": "true", "max-file": "2", "max-size": "10m"},
+        }
+        assert app["HostConfig"]["LogConfig"] == expected_logs
         assert {capability.removeprefix("CAP_") for capability in app["HostConfig"]["CapDrop"]} == {
             "ALL"
         }
@@ -114,16 +119,27 @@ def test_juice_shop_complete_behavioral_equivalence(xdg_paths: Paths) -> None:
             {"HostIp": "127.0.0.1", "HostPort": str(port)}
         ]
         assert gateway["HostConfig"]["RestartPolicy"]["Name"] == "no"
+        assert gateway["HostConfig"]["LogConfig"] == expected_logs
         assert gateway["Config"]["User"] == "1000:1000"
         assert {
             capability.removeprefix("CAP_") for capability in gateway["HostConfig"]["CapAdd"]
         } == {"NET_BIND_SERVICE"}
         network = next(record for record in state.resources if record.name.endswith("-net"))
-        assert docker.inspect("network", network.object_id)["Internal"] is True
+        internal_network = docker.inspect("network", network.object_id)
+        assert internal_network["Internal"] is True
+        assert internal_network["Options"][GATEWAY_MODE_IPV4] == "isolated"
+        ingress = next(record for record in state.resources if record.name.endswith("-ingress"))
+        ingress_network = docker.inspect("network", ingress.object_id)
+        assert ingress_network["Internal"] is False
+        assert ingress_network["Options"][GATEWAY_MODE_IPV4] == "nat"
 
         repeated = runtime.up(lab, host_port=port)
         assert repeated.run_id == original_run
         assert runtime.verify(lab).lock_match
+        assert isinstance(runtime.logs(lab, follow=False), str)
+        restarted = runtime.restart(lab)
+        assert restarted.run_id == original_run
+        _assert_training_functionality(port)
         assert runtime.stop(lab).state == "stopped"
         assert runtime.stop(lab).state == "stopped"
         assert runtime.up(lab).run_id == original_run

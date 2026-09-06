@@ -14,19 +14,19 @@
     "homepage": "https://owasp.org/www-project-mutillidae-ii/"
   },
   "version": {
-    "release": "main",
+    "release": "84f2c00",
     "tag": "main",
-    "commit": ""
+    "commit": "84f2c00d9141dbb9e26a448c8288e651e0b5bb04"
   },
   "license": {
     "spdx": "GPL-3.0-only",
-    "evidence_url": "https://github.com/webpwnized/mutillidae/blob/main/LICENSE",
+    "evidence_url": "https://github.com/webpwnized/mutillidae/blob/84f2c00d9141dbb9e26a448c8288e651e0b5bb04/LICENSE",
     "redistribution": "Upstream images would be pulled; modifications and redistribution must satisfy GPL-3.0."
   },
   "trust": {
     "level": "quarantined",
     "evidence": [
-      "https://github.com/webpwnized/mutillidae/blob/main/.github/workflows/build-scan-push-to-dockerhub.yml"
+      "https://github.com/webpwnized/mutillidae/blob/84f2c00d9141dbb9e26a448c8288e651e0b5bb04/.github/workflows/build-scan-push-to-dockerhub.yml"
     ],
     "limitations": [
       "Provenance, containment, licensing, architecture, or functionality review is incomplete."
@@ -72,7 +72,7 @@
       "internal_port": 80,
       "protocol": "http",
       "health_path": "/",
-      "identity_regex": "Mutillidae"
+      "identity_marker": "Mutillidae"
     },
     {
       "name": "database",
@@ -80,7 +80,7 @@
       "internal_port": 3306,
       "protocol": "tcp",
       "health_path": "/",
-      "identity_regex": "MySQL"
+      "identity_marker": "MySQL"
     },
     {
       "name": "database-admin",
@@ -88,7 +88,7 @@
       "internal_port": 80,
       "protocol": "http",
       "health_path": "/",
-      "identity_regex": "phpMyAdmin"
+      "identity_marker": "phpMyAdmin"
     },
     {
       "name": "directory",
@@ -96,7 +96,7 @@
       "internal_port": 389,
       "protocol": "tcp",
       "health_path": "/",
-      "identity_regex": "LDAP"
+      "identity_marker": "LDAP"
     },
     {
       "name": "directory-admin",
@@ -104,7 +104,7 @@
       "internal_port": 80,
       "protocol": "http",
       "health_path": "/",
-      "identity_regex": "phpLDAPadmin"
+      "identity_marker": "phpLDAPadmin"
     }
   ],
   "friendly_hostname": "mutillidae.test",

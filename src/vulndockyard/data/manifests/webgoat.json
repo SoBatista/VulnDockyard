@@ -51,7 +51,7 @@
       "internal_port": 8080,
       "protocol": "http",
       "health_path": "/WebGoat/actuator/health",
-      "identity_regex": "UP"
+      "identity_marker": "UP"
     },
     {
       "name": "webwolf",
@@ -59,7 +59,7 @@
       "internal_port": 9090,
       "protocol": "http",
       "health_path": "/WebWolf",
-      "identity_regex": "WebWolf"
+      "identity_marker": "WebWolf"
     }
   ],
   "friendly_hostname": "webgoat.test",

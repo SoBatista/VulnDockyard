@@ -35,7 +35,24 @@
     "status_reason": "No official upstream-published application image exists; v1.4 builds with Node 4.4 and Node 4 Alpine while Compose uses unresolved mongo:latest."
   },
   "images": [],
-  "services": [],
+  "services": [
+    {
+      "name": "web",
+      "image_role": "application",
+      "internal_port": 4000,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_marker": "NodeGoat"
+    },
+    {
+      "name": "database",
+      "image_role": "database",
+      "internal_port": 27017,
+      "protocol": "tcp",
+      "health_path": "/",
+      "identity_marker": "MongoDB"
+    }
+  ],
   "friendly_hostname": "nodegoat.test",
   "health_check": {
     "type": "http-identity-and-functionality",
@@ -77,8 +94,8 @@
     "volumes": []
   },
   "outbound_network": {
-    "required": true,
-    "reason": "The SSRF lesson fetches user-supplied URLs.",
+    "required": false,
+    "reason": "Core lessons are local; the SSRF lesson requires an isolated fixture or explicitly acknowledged egress.",
     "challenge_dependencies": [
       "Tutorial embeds external video",
       "SSRF requires an isolated local fixture or explicit egress"

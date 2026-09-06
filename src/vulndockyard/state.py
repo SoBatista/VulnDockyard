@@ -96,8 +96,8 @@ class RuntimePolicySnapshot:
             or any(
                 service.image_role != "application"
                 or service.protocol != "http"
-                or len(service.identity_regex) > 160
-                or not service.identity_regex.isprintable()
+                or len(service.identity_marker) > 160
+                or not service.identity_marker.isprintable()
                 for service in services
             )
         ):

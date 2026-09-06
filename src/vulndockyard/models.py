@@ -156,12 +156,19 @@ class Service:
     internal_port: int
     protocol: str
     health_path: str
-    identity_regex: str
+    identity_marker: str
 
     @classmethod
     def parse(cls, value: object) -> Service:
         data = _mapping(value, "service")
-        keys = {"name", "image_role", "internal_port", "protocol", "health_path", "identity_regex"}
+        keys = {
+            "name",
+            "image_role",
+            "internal_port",
+            "protocol",
+            "health_path",
+            "identity_marker",
+        }
         _require_exact(data, keys, "service")
         port = data["internal_port"]
         if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
@@ -179,17 +186,18 @@ class Service:
             or "#" in path
         ):
             raise IntegrityError("service.health_path must be a safe origin-relative HTTP path")
-        try:
-            re.compile(_string(data["identity_regex"], "service.identity_regex"))
-        except re.error as exc:
-            raise IntegrityError("service.identity_regex is invalid") from exc
+        identity_marker = _string(data["identity_marker"], "service.identity_marker")
+        if len(identity_marker) > 160 or not identity_marker.isprintable():
+            raise IntegrityError(
+                "service.identity_marker must be a printable literal up to 160 characters"
+            )
         return cls(
             _string(data["name"], "service.name"),
             _string(data["image_role"], "service.image_role"),
             port,
             protocol,
             path,
-            _string(data["identity_regex"], "service.identity_regex"),
+            identity_marker,
         )
 
 
@@ -350,6 +358,7 @@ class Manifest:
     trust_evidence: tuple[str, ...]
     trust_limitations: tuple[str, ...]
     verification_platforms: tuple[str, ...]
+    verification_evidence: tuple[str, ...]
     last_verified: date
 
     @classmethod
@@ -450,7 +459,9 @@ class Manifest:
         elif not trust_limitations:
             raise IntegrityError("quarantined trust must record its unresolved limitation")
         roles = {image.role for image in images}
-        if any(service.image_role not in roles for service in services):
+        if status is AdapterStatus.RUNNABLE and any(
+            service.image_role not in roles for service in services
+        ):
             raise IntegrityError("service references an unknown image role")
         outbound = _mapping(data["outbound_network"], "outbound_network")
         _require_exact(
@@ -503,6 +514,8 @@ class Manifest:
             raise IntegrityError("resources.pids is outside the supported range")
         if not isinstance(resource_data["read_only_root"], bool):
             raise IntegrityError("resources.read_only_root must be boolean")
+        if status is AdapterStatus.RUNNABLE and not resource_data["read_only_root"]:
+            raise IntegrityError("current runnable adapters require a read-only root filesystem")
 
         ephemeral_storage = EphemeralStorage.parse(data["ephemeral_storage"])
 
@@ -575,6 +588,7 @@ class Manifest:
             trust_evidence=trust_evidence,
             trust_limitations=trust_limitations,
             verification_platforms=verified_platforms,
+            verification_evidence=verification_evidence,
             last_verified=last_verified,
         )
 
@@ -589,9 +603,15 @@ LOCK_KEYS = {
     "template_sha256",
     "source_sha256",
     "build_recipe_revision",
+    "sbom_url",
+    "provenance_url",
+    "signature_url",
+    "redistribution_status",
+    "redistribution_evidence_url",
     "trust_evidence",
     "verified_at",
     "verified_platforms",
+    "verification_evidence",
 }
 
 
@@ -606,9 +626,15 @@ class Lockfile:
     template_sha256: str
     source_sha256: str
     build_recipe_revision: str
+    sbom_url: str
+    provenance_url: str
+    signature_url: str
+    redistribution_status: str
+    redistribution_evidence_url: str
     trust_evidence: tuple[str, ...]
     verified_at: datetime
     verified_platforms: tuple[str, ...]
+    verification_evidence: tuple[str, ...]
 
     @classmethod
     def parse(cls, value: object) -> Lockfile:
@@ -640,10 +666,37 @@ class Lockfile:
         build_recipe_revision = _string(
             data["build_recipe_revision"], "build_recipe_revision", allow_empty=True
         )
+        evidence_urls: dict[str, str] = {}
+        for key in (
+            "sbom_url",
+            "provenance_url",
+            "signature_url",
+            "redistribution_evidence_url",
+        ):
+            value = _string(data[key], key, allow_empty=True)
+            if value:
+                parsed = urlparse(value)
+                if parsed.scheme != "https" or not parsed.netloc:
+                    raise IntegrityError(f"{key} must be empty or an https URL")
+            evidence_urls[key] = value
+        redistribution_status = _string(data["redistribution_status"], "redistribution_status")
+        if redistribution_status not in {
+            "not-applicable",
+            "unresolved",
+            "permitted",
+            "prohibited",
+        }:
+            raise IntegrityError("redistribution_status is not supported")
+        if (
+            redistribution_status in {"permitted", "prohibited"}
+            and not evidence_urls["redistribution_evidence_url"]
+        ):
+            raise IntegrityError("a resolved redistribution status requires immutable evidence")
         trust_evidence = _https_list(data["trust_evidence"], "trust_evidence")
         if not trust_evidence:
             raise IntegrityError("trust_evidence must not be empty")
         verified_platforms = _platform_list(data["verified_platforms"], "verified_platforms")
+        verification_evidence = _string_list(data["verification_evidence"], "verification_evidence")
         verified_at = _utc_timestamp(data["verified_at"], "verified_at")
         return cls(
             data,
@@ -655,7 +708,13 @@ class Lockfile:
             checksums["template_sha256"],
             checksums["source_sha256"],
             build_recipe_revision,
+            evidence_urls["sbom_url"],
+            evidence_urls["provenance_url"],
+            evidence_urls["signature_url"],
+            redistribution_status,
+            evidence_urls["redistribution_evidence_url"],
             trust_evidence,
             verified_at,
             verified_platforms,
+            verification_evidence,
         )

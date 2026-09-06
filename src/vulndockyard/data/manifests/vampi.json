@@ -13,19 +13,19 @@
     "homepage": "https://github.com/erev0s/VAmPI"
   },
   "version": {
-    "release": "master",
-    "tag": "latest",
-    "commit": ""
+    "release": "f16052d",
+    "tag": "master",
+    "commit": "f16052dce83f05847133ec98f01c5193a41de7d8"
   },
   "license": {
     "spdx": "MIT",
-    "evidence_url": "https://github.com/erev0s/VAmPI/blob/master/LICENSE",
+    "evidence_url": "https://github.com/erev0s/VAmPI/blob/f16052dce83f05847133ec98f01c5193a41de7d8/LICENSE",
     "redistribution": "Upstream image would be pulled; MIT permits redistribution with notice."
   },
   "trust": {
     "level": "quarantined",
     "evidence": [
-      "https://github.com/erev0s/VAmPI/blob/master/.github/workflows/docker-image.yml"
+      "https://github.com/erev0s/VAmPI/blob/f16052dce83f05847133ec98f01c5193a41de7d8/.github/workflows/docker-image.yml"
     ],
     "limitations": [
       "Provenance, containment, licensing, architecture, or functionality review is incomplete."
@@ -50,7 +50,7 @@
       "internal_port": 5000,
       "protocol": "http",
       "health_path": "/",
-      "identity_regex": "vulnerable"
+      "identity_marker": "vulnerable"
     }
   ],
   "friendly_hostname": "vampi.test",

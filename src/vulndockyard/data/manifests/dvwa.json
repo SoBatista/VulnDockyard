@@ -20,7 +20,7 @@
   },
   "license": {
     "spdx": "GPL-3.0-or-later",
-    "evidence_url": "https://github.com/digininja/DVWA/blob/master/COPYING.txt",
+    "evidence_url": "https://github.com/digininja/DVWA/blob/209930b26ef16b1636dfac74ca49b5557fd0528e/COPYING.txt",
     "redistribution": "Upstream image would be pulled; redistribution of modifications must satisfy GPL-3.0-or-later."
   },
   "trust": {
@@ -60,7 +60,7 @@
       "internal_port": 80,
       "protocol": "http",
       "health_path": "/login.php",
-      "identity_regex": "Damn Vulnerable Web Application"
+      "identity_marker": "Damn Vulnerable Web Application"
     },
     {
       "name": "database",
@@ -68,7 +68,7 @@
       "internal_port": 3306,
       "protocol": "tcp",
       "health_path": "/",
-      "identity_regex": "MariaDB"
+      "identity_marker": "MariaDB"
     }
   ],
   "friendly_hostname": "dvwa.test",

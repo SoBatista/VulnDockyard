@@ -20,13 +20,13 @@
   },
   "license": {
     "spdx": "MIT",
-    "evidence_url": "https://github.com/OWASP/railsgoat/blob/main/LICENSE.md",
+    "evidence_url": "https://github.com/OWASP/railsgoat/blob/0222f7da3406ba3ab637bc6d24ae9366b5f0a680/LICENSE.md",
     "redistribution": "A future project build is legally possible with MIT notice, but none is authorized until its build review passes."
   },
   "trust": {
     "level": "quarantined",
     "evidence": [
-      "https://github.com/OWASP/railsgoat/blob/main/docker-compose.yml"
+      "https://github.com/OWASP/railsgoat/blob/0222f7da3406ba3ab637bc6d24ae9366b5f0a680/docker-compose.yml"
     ],
     "limitations": [
       "Provenance, containment, licensing, architecture, or functionality review is incomplete."
@@ -34,7 +34,40 @@
     "status_reason": "No upstream-published image exists; official Compose builds and broadly mounts source, and full lessons need unbundled MySQL and MailCatcher."
   },
   "images": [],
-  "services": [],
+  "services": [
+    {
+      "name": "web",
+      "image_role": "application",
+      "internal_port": 3000,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_marker": "RailsGoat"
+    },
+    {
+      "name": "database",
+      "image_role": "database",
+      "internal_port": 3306,
+      "protocol": "tcp",
+      "health_path": "/",
+      "identity_marker": "MySQL"
+    },
+    {
+      "name": "mail-smtp",
+      "image_role": "mail",
+      "internal_port": 1025,
+      "protocol": "tcp",
+      "health_path": "/",
+      "identity_marker": "SMTP"
+    },
+    {
+      "name": "mail-web",
+      "image_role": "mail",
+      "internal_port": 1080,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_marker": "MailCatcher"
+    }
+  ],
   "friendly_hostname": "railsgoat.test",
   "health_check": {
     "type": "http-identity-and-functionality",
@@ -79,11 +112,10 @@
     ]
   },
   "outbound_network": {
-    "required": true,
-    "reason": "Official supply-chain lesson loads browser assets from jsDelivr.",
+    "required": false,
+    "reason": "Core application services are local; the optional supply-chain lesson loads browser assets from jsDelivr.",
     "challenge_dependencies": [
-      "MySQL is required for some SQL injection lessons",
-      "MailCatcher is needed for mail exercises"
+      "The supply-chain lesson requires jsDelivr unless a contained fixture is provided"
     ]
   },
   "dangerous_capabilities": [],

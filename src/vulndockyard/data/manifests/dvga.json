@@ -14,19 +14,19 @@
     "homepage": "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application"
   },
   "version": {
-    "release": "master",
-    "tag": "latest",
-    "commit": ""
+    "release": "a961308",
+    "tag": "master",
+    "commit": "a961308c02d1fb462b192681c336b0739e432da7"
   },
   "license": {
     "spdx": "MIT",
-    "evidence_url": "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application/blob/master/LICENSE.md",
+    "evidence_url": "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application/blob/a961308c02d1fb462b192681c336b0739e432da7/LICENSE.md",
     "redistribution": "Upstream image would be pulled; MIT permits redistribution with notice."
   },
   "trust": {
     "level": "quarantined",
     "evidence": [
-      "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application/blob/master/Dockerfile"
+      "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application/blob/a961308c02d1fb462b192681c336b0739e432da7/Dockerfile"
     ],
     "limitations": [
       "Provenance, containment, licensing, architecture, or functionality review is incomplete."
@@ -50,7 +50,7 @@
       "internal_port": 5013,
       "protocol": "http",
       "health_path": "/graphiql",
-      "identity_regex": "GraphiQL"
+      "identity_marker": "GraphiQL"
     }
   ],
   "friendly_hostname": "dvga.test",

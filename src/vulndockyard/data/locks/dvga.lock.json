@@ -1,16 +1,22 @@
 {
   "schema_version": 1,
   "lab_id": "dvga",
-  "lab_version": "master",
-  "upstream_release": "latest",
-  "upstream_commit": "",
+  "lab_version": "a961308",
+  "upstream_release": "master",
+  "upstream_commit": "a961308c02d1fb462b192681c336b0739e432da7",
   "images": [],
   "template_sha256": "",
   "source_sha256": "",
   "build_recipe_revision": "",
+  "sbom_url": "",
+  "provenance_url": "",
+  "signature_url": "",
+  "redistribution_status": "not-applicable",
+  "redistribution_evidence_url": "",
   "trust_evidence": [
-    "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application/blob/master/Dockerfile"
+    "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application/blob/a961308c02d1fb462b192681c336b0739e432da7/Dockerfile"
   ],
   "verified_at": "2026-09-06T00:00:00Z",
-  "verified_platforms": []
+  "verified_platforms": [],
+  "verification_evidence": []
 }

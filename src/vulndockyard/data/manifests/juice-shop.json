@@ -63,7 +63,7 @@
       "internal_port": 3000,
       "protocol": "http",
       "health_path": "/",
-      "identity_regex": "OWASP Juice Shop"
+      "identity_marker": "OWASP Juice Shop"
     },
     {
       "name": "challenge-api",
@@ -71,7 +71,7 @@
       "internal_port": 3000,
       "protocol": "http",
       "health_path": "/api/Challenges",
-      "identity_regex": "passwordHashLeakChallenge"
+      "identity_marker": "passwordHashLeakChallenge"
     }
   ],
   "friendly_hostname": "juice-shop.test",
@@ -90,8 +90,12 @@
     ]
   },
   "reset": {
-    "strategy": "Recreate owned containers; server-side data resets on restart",
-    "effects": []
+    "strategy": "Recreate the owned runtime and discard all declared ephemeral data",
+    "effects": [
+      "owned containers and networks",
+      "all eight owned ephemeral data volumes",
+      "server-side accounts, progress, uploads, logs, and generated state"
+    ]
   },
   "default_credentials": [],
   "resources": {
@@ -190,7 +194,7 @@
       "linux/amd64"
     ],
     "evidence": [
-      "local-smoke:linux-amd64:docker-engine-26.1.5:identity-and-lifecycle-passed:2026-09-06"
+      "github-actions-run-34042789523:head-110e12693be25768c42013461939bb8f6968b7cb:ubuntu-24.04:linux-amd64:docker-engine-minimum-28-enforced:identity-and-lifecycle-passed:2026-09-06"
     ]
   },
   "taxonomy": {
