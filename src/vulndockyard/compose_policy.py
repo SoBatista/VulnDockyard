@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import re
 import math
 import posixpath
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
