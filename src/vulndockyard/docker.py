@@ -29,6 +29,7 @@ TRUSTED = "org.vulndockyard.trusted"
 ROLE = "org.vulndockyard.role"
 OBJECT_ID = re.compile(r"^[0-9a-f]{64}$")
 RESOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+CAPABILITY = re.compile(r"^(?:CAP_)?[A-Z][A-Z0-9_]*$")
 ENGINE_VERSION = re.compile(
     r"^(?P<major>0|[1-9][0-9]*)\."
     r"(?P<minor>0|[1-9][0-9]*)\."
@@ -51,6 +52,18 @@ SEED_SCRIPT = (
     f'process.stdout.write("{SEED_READY_MARKER}\\n");'
     "setInterval(()=>{},2147483647);"
 )
+
+
+def canonical_capabilities(value: object) -> tuple[str, ...]:
+    """Normalize Docker's equivalent prefixed capability inspection spelling."""
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or CAPABILITY.fullmatch(item) is None for item in value
+    ):
+        raise IntegrityError("Docker returned malformed Linux capabilities")
+    normalized = tuple(item.removeprefix("CAP_") for item in value)
+    if len(normalized) != len(set(normalized)):
+        raise IntegrityError("Docker returned duplicate Linux capabilities")
+    return normalized
 
 
 def parse_engine_version(value: object) -> tuple[tuple[int, int, int], str]:
@@ -990,7 +1003,9 @@ class Docker:
             or host.get("UsernsMode") == "host"
         ):
             raise PolicyError("Docker gateway uses a host namespace")
-        if host.get("CapDrop") != ["ALL"] or host.get("CapAdd") != ["NET_BIND_SERVICE"]:
+        if canonical_capabilities(host.get("CapDrop")) != (
+            "ALL",
+        ) or canonical_capabilities(host.get("CapAdd")) != ("NET_BIND_SERVICE",):
             raise PolicyError("Docker gateway has unexpected Linux capabilities")
         security_options = host.get("SecurityOpt")
         if (

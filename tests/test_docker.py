@@ -597,10 +597,23 @@ def test_gateway_policy_rejects_effective_containment_drift() -> None:
         with pytest.raises(PolicyError, match=message):
             validate(inspection)
 
+    prefixed = gateway_inspection(ownership())
+    prefixed_host = prefixed["HostConfig"]
+    assert isinstance(prefixed_host, dict)
+    prefixed_host["CapDrop"] = ["CAP_ALL"]
+    prefixed_host["CapAdd"] = ["CAP_NET_BIND_SERVICE"]
+    validate(prefixed)
+
     rejected("Config", "Cmd", ["sh"], "image, user, or command")
     rejected("HostConfig", "NetworkMode", "host", "core runtime")
     rejected("HostConfig", "IpcMode", "host", "host namespace")
     rejected("HostConfig", "CapAdd", ["SYS_ADMIN"], "capabilities")
+    rejected(
+        "HostConfig",
+        "CapAdd",
+        ["CAP_NET_BIND_SERVICE", "CAP_SYS_ADMIN"],
+        "capabilities",
+    )
     rejected("HostConfig", "SecurityOpt", [], "no-new-privileges")
     rejected("HostConfig", "DeviceRequests", [{}], "device access")
     rejected("HostConfig", "PidsLimit", 0, "resource limits")
