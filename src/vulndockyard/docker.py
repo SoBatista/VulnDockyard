@@ -663,7 +663,11 @@ class Docker:
                 or not isinstance(target, str)
             ):
                 raise PolicyError("Docker application has an unreviewed configured mount")
-            if mount.get("ReadOnly") is not False:
+            # Docker omits this false/default field on some Engine API versions.
+            # Absence therefore canonicalizes to writable; any explicit value
+            # other than the boolean false remains a policy violation. The
+            # effective mount inventory below independently requires RW=true.
+            if "ReadOnly" in mount and mount["ReadOnly"] is not False:
                 raise PolicyError(
                     "Docker application named volume is not configured exactly writable"
                 )
