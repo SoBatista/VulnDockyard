@@ -20,9 +20,11 @@ visitor; containment must assume that outcome.
 - Every newly created bridge is inspected by returned object ID for the expected
   driver, internal flag, exact driver options, and full ownership identity before
   any container is attached.
-- Effective container image, user, command, namespaces, capabilities, devices,
-  resource/log limits, writable mounts, and exact network attachments are
-  revalidated against the reviewed runtime contract during lifecycle inspection.
+- Effective container image, user, namespaces, capabilities, devices, resource/log
+  limits, writable mounts, and exact network attachments are revalidated against
+  the reviewed runtime contract during lifecycle inspection. Gateway and seeder
+  commands are compared exactly; the application uses the defaults embedded in
+  its locked image digest and receives no command or entrypoint override.
 - Managed networks reject foreign endpoints, and managed containers reject every
   additional network attachment. Cleanup-only interruption recovery never starts
   or creates a lab on an unsupported Engine.
@@ -57,8 +59,11 @@ can outlive server reset. Users must not add real credentials to labs.
 Ordinary Docker local volumes have no portable per-volume disk quota; a reviewed
 persistent adapter therefore retains a host-disk exhaustion residual risk even
 though CPU, memory, process, and log limits remain enforced. Persistent volumes
-are allowed only as an all-mount v1 policy, with root ownership, exact labels,
-`volume-nocopy`, foreign-consumer rejection, and no automatic update migration.
+are allowed only as an all-mount v1 policy, with exact labels, declared non-root
+application ownership, `volume-nocopy`, foreign-consumer rejection, and no
+automatic update migration. A transient root initializer with only `CAP_CHOWN`
+creates that ownership before application start; Docker-daemon compromise remains
+inside the trusted-host boundary.
 
 The local Docker daemon and its administrator are trusted. In particular, the
 daemon must retain Docker 28's default port-filtering behavior; an administrator

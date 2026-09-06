@@ -64,9 +64,10 @@ creation time, trust state, and role. Names aid operators but confer no ownershi
 Any mismatch stops cleanup. State is checkpointed after each creation so an
 interrupted start can recover exact object IDs. Run-state schema v4 also snapshots
 the complete effective resource, egress, writable-storage, and bounded
-health/identity contract, including whether declared storage is persistent. This lets an update revalidate and smoke its preserved
-rollback deployment even after the installed manifest advances; a legacy state
-without that snapshot is not a transactional rollback base.
+health/identity contract, including whether declared storage is persistent. This
+lets an update revalidate and smoke its preserved rollback deployment even after
+the installed manifest advances; a legacy state without that snapshot is not a
+transactional rollback base.
 
 Application, gateway, and seeder containers use Docker's bounded local logging
 driver (two compressed 10 MiB files) and set the swap-inclusive memory ceiling
@@ -77,25 +78,34 @@ writable path is either a bounded direct tmpfs or an owned
 `noexec,nosuid,nodev` local-driver tmpfs volume. For an adapter that explicitly
 requires persistence, every writable path is an ordinary, exactly owned local
 volume mounted with `volume-nocopy`; mixed persistent/disposable storage is not
-accepted by manifest v1. Seeded volumes are populated once by a short-lived, network-disabled,
-same-image helper running a fixed controller-owned Node script; its inspected
-effective policy, exact null-network attachment, liveness, and readiness marker
-are required, and no seeder remains in the steady state. The application must be
-observed running before the seeder is removed. The controller re-seeds volatile
+accepted by manifest v1. Seeded volumes are populated by a short-lived,
+network-disabled, same-image helper running a fixed controller-owned Node script.
+For disposable storage that helper runs as the application UID/GID and remains
+until application readiness proves that its output is usable. For persistent
+storage a pre-start initializer runs as UID/GID 0 with every capability dropped
+except `CHOWN`, may access only the exact owned volumes, populates only new seeded
+volumes, recursively applies the declared non-root UID/GID without following
+symlinks, and is removed before the application starts. Its inspected effective
+policy, exact null-network attachment, bounded completion, and readiness marker
+are required; no seeder remains in steady state. The controller re-seeds volatile
 data after a stop but never re-seeds preserved data. A persistent rebuild keeps
 the same ownership epoch and exact volume IDs while atomically journaling all
 transient replacement resources. Reset/remove delete only the selected run's
-exactly owned storage. If interruption occurs in the narrow create/checkpoint window,
-observational commands report the orphan; explicit start or cleanup adopts it
-only by deterministic name and complete ownership identity before validation or
-removal.
+exactly owned storage. If interruption occurs in the narrow create/checkpoint
+window, observational commands report the orphan; explicit start or cleanup
+adopts it only by deterministic name and complete ownership identity before
+validation or removal.
 
-Every steady-state lifecycle inspection revalidates the effective image, user,
-fixed command, namespaces, capabilities, devices, resource/log limits, mounts,
-the complete set of container network attachments, and the complete set of
-running network endpoints before reporting a healthy managed state. Docker omits
-stopped containers from network endpoint inventories, so their configured
-attachments remain enforced through container inspection.
+Every steady-state lifecycle inspection revalidates the effective image and user,
+namespaces, capabilities, devices, resource/log limits, mounts, the complete set
+of container network attachments, and the complete set of running network
+endpoints before reporting a healthy managed state. Gateway and seeder commands
+are controller-owned and compared exactly. An application receives no command or
+entrypoint override: it executes the defaults embedded in its exact locked image
+digest. The Docker daemon is inside the trust boundary, and those immutable image
+defaults are not redundantly projected into manifest v1. Docker omits stopped
+containers from network endpoint inventories, so their configured attachments
+remain enforced through container inspection.
 
 An update candidate is never synthesized from mutable discovery data. It is the
 already-installed, schema-validated manifest/lock pair, and it is eligible only
