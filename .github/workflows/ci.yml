@@ -8,6 +8,12 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+    inputs:
+      smoke_only:
+        description: Run only the Docker smoke and residual-resource audit
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -19,6 +25,7 @@ concurrency:
 jobs:
   quality:
     name: quality-python-3.11
+    if: github.event_name != 'workflow_dispatch' || inputs.smoke_only != true
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -41,6 +48,7 @@ jobs:
 
   python-compatibility:
     name: python-${{ matrix.python-version }}-compatibility
+    if: github.event_name != 'workflow_dispatch' || inputs.smoke_only != true
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:

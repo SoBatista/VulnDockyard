@@ -53,7 +53,9 @@ dependency locks, package metadata, or the smoke workflow run the complete
 runnable-lab matrix. A push limited to reviewed documentation and governance
 files reports success without installing dependencies or pulling images. A
 missing or malformed commit range fails closed to the full smoke. Manual dispatch
-always runs it. Expanding the low-risk set requires a reviewed risk-model change;
+always runs it. A manual `smoke_only` dispatch skips the already-passed quality
+and Python-compatibility jobs, so an exact commit can be smoke-tested without
+duplicating those gates. Expanding the low-risk set requires a reviewed risk-model change;
 new executable or catalogue paths are never implicitly exempted.
 
 The required CI quality job owns the single installed-environment dependency check
