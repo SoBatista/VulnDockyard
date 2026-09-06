@@ -31,4 +31,3 @@ We classify reports as:
 Do not publicly demonstrate a controller escape before a coordinated fix is
 available. Training vulnerabilities remain documented at taxonomy level, but
 normal output deliberately excludes walkthroughs, flags, and detailed solutions.
-

@@ -17,4 +17,3 @@ Material decisions—trust-level promotion, redistribution authority, capability
 exceptions, new registries, release publication, or governance changes—are
 recorded in a pull request. The maintainer may delegate ordinary review while
 retaining release accountability.
-

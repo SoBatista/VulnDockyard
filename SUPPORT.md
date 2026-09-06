@@ -13,4 +13,3 @@ private registry credentials.
 Upstream lab behavior remains the upstream project's responsibility. We will
 help classify an issue and document a minimal reproduction, but will not fork or
 open an upstream report without explicit authorization.
-

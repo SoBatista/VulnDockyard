@@ -9,4 +9,3 @@ paths = [
   '''tests/.*''',
   '''src/vulndockyard/data/manifests/.*\.json''',
 ]
-
