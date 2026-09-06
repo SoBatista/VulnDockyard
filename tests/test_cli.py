@@ -396,8 +396,14 @@ class DoctorDocker:
 def test_doctor_success_and_repair_flag_parse(
     isolated_cli: type[FakeRuntime],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    hosts = tmp_path / "hosts"
+    hosts.write_bytes(b"127.0.0.1 localhost\n")
+    hosts.chmod(0o644)
+    FixtureHostsManager.fixture_path = hosts
+    monkeypatch.setattr(cli, "HostsManager", FixtureHostsManager)
     monkeypatch.setattr(cli, "Docker", DoctorDocker)
     monkeypatch.setattr(cli, "port_available", lambda port: True)
     assert cli.main(["doctor"]) == 0
@@ -410,6 +416,7 @@ def test_doctor_success_and_repair_flag_parse(
 def test_doctor_advisory_failures_do_not_fail(
     isolated_cli: type[FakeRuntime],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class NoComposeDocker:
@@ -422,6 +429,11 @@ def test_doctor_advisory_failures_do_not_fail(
                 "compose_v2": False,
             }
 
+    hosts = tmp_path / "hosts"
+    hosts.write_bytes(b"127.0.0.1 localhost\n")
+    hosts.chmod(0o644)
+    FixtureHostsManager.fixture_path = hosts
+    monkeypatch.setattr(cli, "HostsManager", FixtureHostsManager)
     monkeypatch.setattr(cli, "Docker", NoComposeDocker)
     monkeypatch.setattr(cli, "port_available", lambda port: False)
     assert cli.main(["doctor"]) == 0
