@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -12,9 +14,11 @@ import shutil
 import stat
 import tarfile
 import tempfile
+import time
 import tomllib
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from datetime import date
 from importlib import resources
@@ -171,6 +175,44 @@ class VulhubProvider:
             os.fchmod(descriptor, 0o700)
             if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o700:
                 raise IntegrityError("Vulhub cache parent permissions could not be secured")
+        finally:
+            os.close(descriptor)
+
+    @contextlib.contextmanager
+    def _provider_lock(self, *, exclusive: bool, timeout: float = 10) -> Iterator[None]:
+        if not math.isfinite(timeout) or not 0 < timeout <= 30:
+            raise PolicyError("provider cache lock timeout must be between 0 and 30 seconds")
+        parent = self.root.parent
+        self._ensure_private_directory(parent)
+        lock_path = parent / ".vulhub.lock"
+        descriptor = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+        try:
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+            ):
+                raise IntegrityError("Vulhub cache lock has unsafe type, ownership, or mode")
+            os.fchmod(descriptor, 0o600)
+            operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise PolicyError("timed out waiting for the Vulhub cache lock") from exc
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
 
@@ -357,6 +399,14 @@ class VulhubProvider:
         return roots[0]
 
     def sync(self, *, timeout: float = 60) -> tuple[ProviderEntry, ...]:
+        if not math.isfinite(timeout) or not 1 <= timeout <= 300:
+            raise PolicyError("provider sync timeout must be between 1 and 300 seconds")
+        self.paths.ensure()
+        self._ensure_private_directory(self.root.parent)
+        with self._provider_lock(exclusive=True, timeout=min(timeout, 30)):
+            return self._sync_unlocked(timeout=timeout)
+
+    def _sync_unlocked(self, *, timeout: float) -> tuple[ProviderEntry, ...]:
         self.paths.ensure()
         self._ensure_private_directory(self.root.parent)
         lock = load_provider_lock()
@@ -551,6 +601,10 @@ class VulhubProvider:
         return tuple(entries)
 
     def status(self) -> dict[str, object]:
+        with self._provider_lock(exclusive=False):
+            return self._status_unlocked()
+
+    def _status_unlocked(self) -> dict[str, object]:
         lock = load_provider_lock()
         try:
             integrity, index_bytes = self._cache_metadata()
@@ -586,6 +640,10 @@ class VulhubProvider:
         }
 
     def entries(self) -> tuple[ProviderEntry, ...]:
+        with self._provider_lock(exclusive=False):
+            return self._entries_unlocked()
+
+    def _entries_unlocked(self) -> tuple[ProviderEntry, ...]:
         try:
             lock = load_provider_lock()
             integrity, index_bytes = self._cache_metadata()

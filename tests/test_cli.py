@@ -11,7 +11,7 @@ import pytest
 import vulndockyard.cli as cli
 from vulndockyard.catalogue import Catalogue, ReviewedLab
 from vulndockyard.errors import CancelledError
-from vulndockyard.hosts import HostsManager, parse_managed_hosts
+from vulndockyard.hosts import HostsManager, HostsPreview, parse_managed_hosts
 from vulndockyard.paths import Paths
 from vulndockyard.runtime import CleanupPreview, RuntimeStatus, RuntimeUpdate
 from vulndockyard.state import ResourceRecord
@@ -195,6 +195,16 @@ def test_json_contract_is_stable_and_deterministic(
     help_document = json.loads(capsys.readouterr().out)
     assert help_document["command"] == "help"
     assert help_document["data"]["topic"] == "status"
+
+
+def test_human_trust_output_includes_evidence_limitations_and_locked_images(
+    isolated_cli: type[FakeRuntime], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["trust", "juice-shop"]) == 0
+    output = capsys.readouterr().out
+    assert "Evidence:\n  - https://" in output
+    assert "Limitations:\n  - Digest pinning" in output
+    assert "Locked images:\n  - application: docker.io/bkimminich/juice-shop@sha256:" in output
 
 
 def test_json_destructive_command_is_one_document(
@@ -431,6 +441,48 @@ class FixtureHostsManager(HostsManager):
 
     def __init__(self) -> None:
         super().__init__(self.fixture_path)
+
+
+def test_system_hosts_update_uses_one_confirmed_atomic_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SystemHostsManager:
+        path = Path("/etc/hosts")
+
+        @staticmethod
+        def preview_many(hostnames: tuple[str, ...], *, add: bool) -> HostsPreview:
+            assert hostnames == ("juice-shop.test", "webgoat.test")
+            assert add
+            return HostsPreview(
+                (),
+                hostnames,
+                True,
+                "",
+                "managed block",
+                "a" * 64,
+                "b" * 64,
+            )
+
+        @staticmethod
+        def managed_hosts() -> tuple[str, ...]:
+            return ("juice-shop.test", "webgoat.test")
+
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(
+        cli,
+        "invoke_hosts_helper",
+        lambda checksum, hostnames: calls.append((checksum, hostnames)),
+    )
+
+    result = cli._apply_hostnames(
+        SystemHostsManager(),  # type: ignore[arg-type]
+        ("juice-shop.test", "webgoat.test"),
+        add=True,
+        yes=True,
+    )
+
+    assert result["applied"] is True
+    assert calls == [("a" * 64, ("juice-shop.test", "webgoat.test"))]
 
 
 def test_hosts_commands_are_idempotent_on_fixture(

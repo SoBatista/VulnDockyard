@@ -5,6 +5,7 @@ import os
 import runpy
 import stat
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,6 +59,94 @@ def test_packaged_helper_preserves_a_missing_final_newline_round_trip() -> None:
     assert transform(added, []) == original
 
 
+def test_packaged_helper_replaces_the_confirmed_set_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespace = runpy.run_path(str(privilege.packaged_helper()), run_name="vdy_hosts_helper_test")
+    hosts = tmp_path / "hosts"
+    original = b"127.0.0.1 localhost\n"
+    hosts.write_bytes(original)
+    hosts.chmod(0o600)
+    helper_globals = namespace["main"].__globals__
+    helper_globals["HOSTS"] = str(hosts)
+    helper_globals["snapshot"] = lambda: (hosts.lstat(), hosts.read_bytes())
+    checksum = hashlib.sha256(original).hexdigest()
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["vulndockyard-hosts", "replace", checksum, "juice-shop.test", "webgoat.test"],
+    )
+
+    assert namespace["main"]() == 0
+    assert namespace["parse"](hosts.read_bytes()) == (
+        b"juice-shop.test",
+        b"webgoat.test",
+    )
+
+
+def test_packaged_helper_rejects_a_stale_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespace = runpy.run_path(str(privilege.packaged_helper()), run_name="vdy_hosts_helper_test")
+    hosts = tmp_path / "hosts"
+    original = b"127.0.0.1 localhost\n"
+    hosts.write_bytes(original)
+    hosts.chmod(0o600)
+    helper_globals = namespace["main"].__globals__
+    helper_globals["HOSTS"] = str(hosts)
+    helper_globals["snapshot"] = lambda: (hosts.lstat(), hosts.read_bytes())
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["vulndockyard-hosts", "replace", "0" * 64, "juice-shop.test"],
+    )
+
+    with pytest.raises(SystemExit):
+        namespace["main"]()
+    assert hosts.read_bytes() == original
+
+
+def test_packaged_helper_refuses_a_change_before_atomic_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespace = runpy.run_path(str(privilege.packaged_helper()), run_name="vdy_hosts_helper_test")
+    hosts = tmp_path / "hosts"
+    original = b"127.0.0.1 localhost\n"
+    foreign = original + b"# concurrent foreign edit\n"
+    hosts.write_bytes(original)
+    hosts.chmod(0o600)
+    helper_globals = namespace["main"].__globals__
+    helper_globals["HOSTS"] = str(hosts)
+    snapshots = 0
+
+    def changing_snapshot() -> tuple[os.stat_result, bytes]:
+        nonlocal snapshots
+        snapshots += 1
+        if snapshots == 2:
+            hosts.write_bytes(foreign)
+            hosts.chmod(0o600)
+        return hosts.lstat(), hosts.read_bytes()
+
+    helper_globals["snapshot"] = changing_snapshot
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vulndockyard-hosts",
+            "replace",
+            hashlib.sha256(original).hexdigest(),
+            "juice-shop.test",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        namespace["main"]()
+    assert hosts.read_bytes() == foreign
+
+
 @pytest.mark.parametrize(
     "content",
     (
@@ -95,12 +184,25 @@ def test_invoke_uses_only_validated_helper_and_system_sudo(
     monkeypatch.setattr(privilege, "_root_executable", lambda *args, **kwargs: next(selected))
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     runner = RecordingRunner()
-    privilege.invoke_hosts_helper("add", "juice-shop.test", runner)
+    checksum = "a" * 64
+    privilege.invoke_hosts_helper(checksum, ("juice-shop.test", "webgoat.test"), runner)
     assert runner.commands == [
-        ("/usr/bin/sudo", "--", "/approved/helper", "add", "juice-shop.test")
+        (
+            "/usr/bin/sudo",
+            "--",
+            "/approved/helper",
+            "replace",
+            checksum,
+            "juice-shop.test",
+            "webgoat.test",
+        )
     ]
 
 
-def test_invoke_rejects_unknown_action() -> None:
-    with pytest.raises(ValueError, match="action"):
-        privilege.invoke_hosts_helper("replace", "juice-shop.test")
+@pytest.mark.parametrize(
+    ("checksum", "hostnames"),
+    (("bad", ()), ("a" * 64, ("UPPER.test",)), ("a" * 64, ("webgoat.test", "a.test"))),
+)
+def test_invoke_rejects_malformed_replacement(checksum: str, hostnames: tuple[str, ...]) -> None:
+    with pytest.raises(ValueError, match="hosts-helper"):
+        privilege.invoke_hosts_helper(checksum, hostnames)

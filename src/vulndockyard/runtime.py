@@ -12,7 +12,6 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-import webbrowser
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from typing import Any
@@ -23,6 +22,7 @@ from .errors import IntegrityError, PolicyError, PreflightError, VulnDockyardErr
 from .httpio import fetch_bounded
 from .models import DIGEST, OCI_NAME, AdapterStatus, EphemeralMount, Image
 from .paths import Paths
+from .process import Runner
 from .state import ResourceRecord, RunState, RuntimePolicySnapshot, StateStore, UpdateJournal
 
 
@@ -78,6 +78,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 def _open_local_health(request: urllib.request.Request, *, timeout: float) -> Any:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     return opener.open(request, timeout=timeout)
+
+
+def _open_url(url: str) -> None:
+    Runner(max_output_bytes=65_536).run(("xdg-open", url), timeout=10)
 
 
 def _temporary_loopback_port(excluded: int) -> int:
@@ -240,12 +244,13 @@ class Runtime:
         return local_platform
 
     def pull(self, lab: ReviewedLab) -> tuple[str, ...]:
-        self._require_runnable(lab)
-        self._preflight_lab(lab)
-        references = tuple(image.reference for image in lab.manifest.images)
-        for reference in references:
-            self.docker.pull(reference)
-        return references
+        with self._lifecycle():
+            self._require_runnable(lab)
+            self._preflight_lab(lab)
+            references = tuple(image.reference for image in lab.manifest.images)
+            for reference in references:
+                self.docker.pull(reference)
+            return references
 
     @staticmethod
     def _validate_candidate(lab: ReviewedLab) -> None:
@@ -1137,6 +1142,7 @@ class Runtime:
     def _status(self, lab: ReviewedLab) -> RuntimeStatus:
         state = self.store.load(lab.manifest.id)
         if state is None:
+            self._assert_no_orphans(lab.manifest.id)
             return RuntimeStatus(
                 lab.manifest.id,
                 "absent",
@@ -2568,6 +2574,7 @@ class Runtime:
     def _logs(self, lab: ReviewedLab, *, follow: bool) -> str:
         state = self.store.load(lab.manifest.id)
         if state is None:
+            self._assert_no_orphans(lab.manifest.id)
             raise PolicyError(f"{lab.manifest.id} has no managed runtime")
         if state.runtime_policy is None and state.manifest_identity != lab.manifest_identity:
             raise PolicyError(
@@ -2591,8 +2598,7 @@ class Runtime:
         status = self.status(lab)
         if status.state != "running":
             raise PolicyError(f"{lab.manifest.id} is not running")
-        if not webbrowser.open(status.url):
-            raise PreflightError(f"could not open a browser; visit {status.url}")
+        _open_url(status.url)
         return status.url
 
     def verify(self, lab: ReviewedLab) -> RuntimeStatus:

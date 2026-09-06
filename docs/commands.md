@@ -17,7 +17,7 @@ normal output excludes spoilers and flags. Stable exits are: 0 success, 2 usage,
 | `up LAB` / `start LAB` | Idempotent start; default gateway is `127.0.0.1:80`. |
 | `status [LAB]` | Requested reference, resolved digest, trust, run ID, and lock match. |
 | `verify LAB` | Identity and expected-functionality readiness plus lock match. |
-| `open LAB` / `logs LAB` | Open URL or show bounded application logs after revalidating the effective containment policy. |
+| `open LAB` / `logs LAB` | Hand the URL to `xdg-open` through a bounded subprocess or show bounded application logs after revalidating the effective containment policy. Follow mode returns the output captured when its five-minute bound expires. |
 | `down LAB` / `stop LAB` | Idempotently stop, retain runtime and data. |
 | `restart LAB` | Stop/start the same locked deployment. |
 | `rebuild LAB` | Recreate only the same reviewed lock/reference; preserve every exactly owned declared persistent volume, and refuse stale, untrusted, missing, relabeled, or foreign-consumed state. |
@@ -47,7 +47,8 @@ After an interactive non-JSON `up`, the CLI offers to add the selected `.test`
 name when it is absent. Declining, interrupting, or failing this optional hosts
 step leaves the successfully started lab running and reports the manual command.
 
-Docker operations are always bounded. Advanced users may configure validated
+Docker operations are always bounded. Image pulls are serialized with lifecycle
+and cleanup mutations. Advanced users may configure validated
 seconds with `VDY_TIMEOUT_PULL`, `VDY_TIMEOUT_START`, `VDY_TIMEOUT_HEALTH`,
 `VDY_TIMEOUT_STOP`, `VDY_TIMEOUT_CLEANUP`, and `VDY_TIMEOUT_INSPECT`. Each variable
 has a finite accepted range; invalid, zero, negative, or unbounded values fail the

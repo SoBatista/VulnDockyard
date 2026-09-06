@@ -228,7 +228,7 @@ def _apply_hosts(
     labs: tuple[ReviewedLab, ...], *, add: bool, yes: bool, preview_only: bool = False
 ) -> dict[str, Any]:
     manager = HostsManager()
-    hostnames = tuple(lab.manifest.friendly_hostname for lab in labs)
+    hostnames = tuple(sorted(lab.manifest.friendly_hostname for lab in labs))
     return _apply_hostnames(manager, hostnames, add=add, yes=yes, preview_only=preview_only)
 
 
@@ -251,6 +251,8 @@ def _apply_hostnames(
             "hostnames": hostnames,
             "before_block": preview.before_block,
             "after_block": preview.after_block,
+            "before_sha256": preview.before_sha256,
+            "after_sha256": preview.after_sha256,
         }
     if preview_only:
         return {
@@ -260,21 +262,25 @@ def _apply_hostnames(
             "hostnames": changed,
             "before_block": preview.before_block,
             "after_block": preview.after_block,
+            "before_sha256": preview.before_sha256,
+            "after_sha256": preview.after_sha256,
         }
     if not yes:
         proposed = preview.after_block.rstrip() or "(VulnDockyard managed block removed)"
         print(f"Proposed VulnDockyard hosts modification:\n{proposed}")
     _confirm(f"{action} VulnDockyard hosts entries: {', '.join(changed)}", yes=yes)
     if manager.path != Path("/etc/hosts"):
-        manager.apply_many(changed, add=add)
+        manager.apply_many(
+            hostnames,
+            add=add,
+            expected_before_sha256=preview.before_sha256,
+            expected_after=preview.after,
+        )
     else:
-        for hostname in changed:
-            invoke_hosts_helper(action, hostname)
+        invoke_hosts_helper(preview.before_sha256, preview.after)
     final = manager.managed_hosts()
-    if add and not set(changed).issubset(final):
+    if final != preview.after:
         raise PreflightError("managed hosts update could not be verified")
-    if not add and set(changed) & set(final):
-        raise PreflightError("managed hosts removal could not be verified")
     return {
         "action": action,
         "changed": True,
@@ -283,6 +289,8 @@ def _apply_hostnames(
         "managed_after": tuple(sorted(final)),
         "before_block": preview.before_block,
         "after_block": preview.after_block,
+        "before_sha256": preview.before_sha256,
+        "after_sha256": preview.after_sha256,
     }
 
 
@@ -538,7 +546,18 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
                 **lab.manifest.raw["trust"],
                 "images": [dataclasses.asdict(image) for image in lab.manifest.images],
             }
-            human = f"{lab.manifest.id}: {lab.manifest.trust.value}\n{lab.manifest.status_reason}"
+            evidence = "\n".join(f"  - {item}" for item in lab.manifest.trust_evidence)
+            limitations = "\n".join(f"  - {item}" for item in lab.manifest.trust_limitations)
+            images = "\n".join(
+                f"  - {image.role}: {image.reference}" for image in lab.manifest.images
+            )
+            human = (
+                f"{lab.manifest.id}: {lab.manifest.trust.value}\n"
+                f"Status: {lab.manifest.status_reason}\n"
+                f"Evidence:\n{evidence}\n"
+                f"Limitations:\n{limitations}\n"
+                f"Locked images:\n{images}"
+            )
         else:
             value = dict(lab.manifest.raw)
             if not args.ground_truth:

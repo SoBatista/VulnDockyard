@@ -28,8 +28,8 @@ from vulndockyard.docker import (
 from vulndockyard.errors import IntegrityError, PolicyError, PreflightError
 from vulndockyard.models import Manifest
 from vulndockyard.paths import Paths
-from vulndockyard.process import Result
-from vulndockyard.runtime import Runtime, _NoRedirect, _runtime_policy
+from vulndockyard.process import Result, Runner
+from vulndockyard.runtime import Runtime, _NoRedirect, _open_url, _runtime_policy
 from vulndockyard.state import ResourceRecord, RunState, RuntimePolicySnapshot, UpdateJournal
 
 
@@ -2391,12 +2391,36 @@ def test_missing_state_orphans_are_never_inferred_or_removed(xdg_paths: Paths) -
         True,
     )
     orphan = docker.create_network("vdy-juice-shop-aaaaaaaaaaaa-net", ownership)
+    observations = (
+        lambda: value.status(lab),
+        lambda: value.logs(lab, follow=False),
+        lambda: value.open(lab),
+        lambda: value.verify(lab),
+    )
+    for observe in observations:
+        with pytest.raises(PolicyError, match="without usable runtime state"):
+            observe()
     with pytest.raises(PolicyError, match="without usable runtime state"):
         value.remove(lab)
     with pytest.raises(PolicyError, match="unrecorded managed Docker resources"):
         value.up(lab, host_port=18080)
     assert orphan.object_id in docker.objects
     assert docker.removed == []
+
+
+def test_pull_holds_the_lifecycle_lock_for_every_image(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    original_pull = docker.pull
+
+    def require_lock(reference: str) -> None:
+        assert value._lock_depth == 1
+        original_pull(reference)
+
+    monkeypatch.setattr(docker, "pull", require_lock)
+    assert value.pull(lab) == tuple(image.reference for image in lab.manifest.images)
+    assert value._lock_depth == 0
 
 
 def test_single_lab_start_blocks_unrecorded_resources_from_any_lab(xdg_paths: Paths) -> None:
@@ -2719,7 +2743,7 @@ def test_runtime_pull_verify_open_and_residual_audit(
     assert len(owned_volume_names) == 4
     assert all(name.startswith("vdy-juice-shop-") for name in owned_volume_names)
     assert value.verify(lab).lock_match
-    monkeypatch.setattr("vulndockyard.runtime.webbrowser.open", lambda url: True)
+    monkeypatch.setattr("vulndockyard.runtime._open_url", lambda url: None)
     assert value.open(lab) == "http://juice-shop.test:18080"
     audit = value.residual_audit()
     assert len(audit["container"]) == 2
@@ -2730,6 +2754,26 @@ def test_runtime_pull_verify_open_and_residual_audit(
         value.verify(lab)
     with pytest.raises(PolicyError, match="not running"):
         value.open(lab)
+
+
+def test_url_opener_uses_bounded_argv_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[tuple[str, ...], float, int]] = []
+
+    def run(
+        self: Runner,
+        argv: tuple[str, ...],
+        *,
+        timeout: float,
+        check: bool = True,
+        env: object = None,
+    ) -> Result:
+        del check, env
+        calls.append((argv, timeout, self.max_output_bytes))
+        return Result(argv, 0, "", "")
+
+    monkeypatch.setattr("vulndockyard.runtime.Runner.run", run)
+    _open_url("http://juice-shop.test:18080")
+    assert calls == [(("xdg-open", "http://juice-shop.test:18080"), 10, 65_536)]
 
 
 def test_runtime_rejects_invalid_port_egress_and_multiple_state(xdg_paths: Paths) -> None:

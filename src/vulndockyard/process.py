@@ -31,6 +31,12 @@ class CommandError(VulnDockyardError):
         self.result = result
 
 
+class CommandTimeout(PreflightError):
+    def __init__(self, result: Result, timeout: float) -> None:
+        super().__init__(f"command timed out after {timeout:g}s: {result.argv[0]}")
+        self.result = result
+
+
 class Runner:
     def __init__(
         self, *, max_output_bytes: int = 4 * 1024 * 1024, terminate_grace: float = 2
@@ -102,6 +108,18 @@ class Runner:
         stdout = bytearray()
         stderr = bytearray()
         captured = (stdout, stderr)
+
+        def captured_result(returncode: int) -> Result:
+            return Result(
+                tuple(argv),
+                returncode,
+                stdout.decode("utf-8", "replace"),
+                stderr.decode("utf-8", "replace"),
+            )
+
+        def timeout_error() -> CommandTimeout:
+            return CommandTimeout(captured_result(124), timeout)
+
         selector = selectors.DefaultSelector()
         for index, stream in enumerate(streams):
             assert stream is not None
@@ -112,7 +130,7 @@ class Runner:
             while selector.get_map():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise PreflightError(f"command timed out after {timeout:g}s: {argv[0]}")
+                    raise timeout_error()
                 events = selector.select(min(remaining, 0.1))
                 if not events and process.poll() is not None:
                     events = [(key, selectors.EVENT_READ) for key in selector.get_map().values()]
@@ -128,11 +146,11 @@ class Runner:
                         )
             remaining = deadline - time.monotonic()
             if remaining <= 0 and process.poll() is None:
-                raise PreflightError(f"command timed out after {timeout:g}s: {argv[0]}")
+                raise timeout_error()
             returncode = process.wait(timeout=max(remaining, 0.001))
         except subprocess.TimeoutExpired as exc:
             self._terminate(process, process_group)
-            raise PreflightError(f"command timed out after {timeout:g}s: {argv[0]}") from exc
+            raise timeout_error() from exc
         except BaseException:
             self._terminate(process, process_group)
             raise
@@ -142,12 +160,7 @@ class Runner:
                 if stream is not None:
                     stream.close()
 
-        result = Result(
-            tuple(argv),
-            returncode,
-            stdout.decode("utf-8", "replace"),
-            stderr.decode("utf-8", "replace"),
-        )
+        result = captured_result(returncode)
         if check and result.returncode != 0:
             raise CommandError(result)
         return result

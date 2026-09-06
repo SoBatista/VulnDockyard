@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import io
 import json
 import tarfile
+import threading
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -103,6 +105,95 @@ def test_provider_lock_is_exact_and_official() -> None:
     assert len(lock.commit) == 40
     assert lock.archive_url == f"https://codeload.github.com/vulhub/vulhub/tar.gz/{lock.commit}"
     assert lock.archive_sha256.startswith("sha256:")
+
+
+def test_provider_cache_lock_serializes_readers_and_writers(xdg_paths: Paths) -> None:
+    provider = VulhubProvider(xdg_paths)
+    provider.paths.ensure()
+    provider._ensure_private_directory(provider.root.parent)
+
+    with (
+        provider._provider_lock(exclusive=True),
+        pytest.raises(PolicyError, match="timed out waiting"),
+        provider._provider_lock(exclusive=False, timeout=0.1),
+    ):
+        pytest.fail("a reader acquired an exclusively held provider lock")
+
+
+def test_provider_public_reader_waits_for_first_sync_activation(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = VulhubProvider(xdg_paths)
+    writer_entered = threading.Event()
+    release_writer = threading.Event()
+    reader_finished = threading.Event()
+    failures: list[BaseException] = []
+    observed: list[object] = []
+
+    def paused_sync(*, timeout: float) -> tuple[object, ...]:
+        del timeout
+        writer_entered.set()
+        if not release_writer.wait(2):
+            raise RuntimeError("test writer release timed out")
+        return ()
+
+    def sync() -> None:
+        try:
+            provider.sync(timeout=2)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    def status() -> None:
+        try:
+            observed.append(provider.status())
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+        finally:
+            reader_finished.set()
+
+    monkeypatch.setattr(provider, "_sync_unlocked", paused_sync)
+    writer = threading.Thread(target=sync)
+    reader = threading.Thread(target=status)
+    writer.start()
+    assert writer_entered.wait(1)
+    reader.start()
+    assert not reader_finished.wait(0.1)
+    release_writer.set()
+    writer.join(2)
+    reader.join(2)
+
+    assert not writer.is_alive() and not reader.is_alive()
+    assert failures == []
+    assert observed == [
+        {
+            "provider": "vulhub",
+            "state": "not-synced",
+            "pinned_commit": load_provider_lock().commit,
+            "entries": 0,
+        }
+    ]
+
+
+def test_provider_public_methods_select_the_required_lock_mode(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = VulhubProvider(xdg_paths)
+    modes: list[bool] = []
+
+    @contextlib.contextmanager
+    def record_lock(*, exclusive: bool, timeout: float = 10) -> Iterator[None]:
+        del timeout
+        modes.append(exclusive)
+        yield
+
+    monkeypatch.setattr(provider, "_provider_lock", record_lock)
+    monkeypatch.setattr(provider, "_sync_unlocked", lambda timeout: ())
+    provider.sync()
+    provider.status()
+    with pytest.raises(PolicyError, match="not synced"):
+        provider.entries()
+
+    assert modes == [True, False, False]
 
 
 def test_verified_sync_indexes_but_does_not_approve(

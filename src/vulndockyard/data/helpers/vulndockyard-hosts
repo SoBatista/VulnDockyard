@@ -2,6 +2,7 @@
 """Root-owned narrow /etc/hosts editor for VulnDockyard protocol 1."""
 
 import contextlib
+import hashlib
 import os
 import re
 import stat
@@ -136,24 +137,31 @@ def snapshot():
 
 
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in {"add", "remove"}:
-        fail("usage: vulndockyard-hosts {add|remove} LAB.test")
-    hostname = os.fsencode(sys.argv[2])
-    if not HOSTNAME.fullmatch(hostname):
-        fail("hostname must be a lowercase .test name")
+    if len(sys.argv) < 3 or sys.argv[1] != "replace":
+        fail("usage: vulndockyard-hosts replace EXPECTED_SHA256 [LAB.test ...]")
+    expected_sha256 = sys.argv[2]
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        fail("expected hosts-file checksum is malformed")
+    values = tuple(os.fsencode(value) for value in sys.argv[3:])
+    if (
+        len(values) > 256
+        or tuple(sorted(set(values))) != values
+        or any(not HOSTNAME.fullmatch(value) for value in values)
+    ):
+        fail("hostnames must be a sorted unique set of lowercase .test names")
     if os.geteuid() != 0:
         fail("helper must run as root")
     info, content = snapshot()
-    values = set(parse(content))
-    if sys.argv[1] == "add":
-        values.add(hostname)
-    else:
-        values.discard(hostname)
-    expected = tuple(sorted(values))
-    updated = transform(content, expected)
+    if hashlib.sha256(content).hexdigest() != expected_sha256:
+        fail("/etc/hosts changed after the confirmed preview")
+    parse(content)
+    updated = transform(content, values)
     if updated == content:
         return 0
-    descriptor, temporary = tempfile.mkstemp(prefix=".vulndockyard-hosts-", dir="/etc")
+    directory_path = os.path.dirname(HOSTS) or "."
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".vulndockyard-hosts-", dir=directory_path
+    )
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(updated)
@@ -162,13 +170,13 @@ def main():
         os.chmod(temporary, stat.S_IMODE(info.st_mode))
         os.chown(temporary, info.st_uid, info.st_gid)
         with open(temporary, "rb") as handle:
-            if parse(handle.read()) != expected:
+            if parse(handle.read()) != values:
                 fail("temporary hosts file failed validation")
         current, current_content = snapshot()
         if fingerprint(current) != fingerprint(info) or current_content != content:
             fail("/etc/hosts changed before atomic replacement")
         os.replace(temporary, HOSTS)
-        directory = os.open("/etc", os.O_RDONLY | os.O_DIRECTORY)
+        directory = os.open(directory_path, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
         finally:

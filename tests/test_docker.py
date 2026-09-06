@@ -26,7 +26,7 @@ from vulndockyard.docker import (
 )
 from vulndockyard.errors import IntegrityError, PolicyError, PreflightError
 from vulndockyard.models import EphemeralMount
-from vulndockyard.process import CommandError, Result, Runner
+from vulndockyard.process import CommandError, CommandTimeout, Result, Runner
 from vulndockyard.state import ResourceRecord
 
 
@@ -35,6 +35,7 @@ class RecordingRunner(Runner):
         self.calls: list[tuple[str, ...]] = []
         self.environments: list[Mapping[str, str] | None] = []
         self.responses: list[Result] = []
+        self.error: Exception | None = None
 
     def run(
         self,
@@ -47,6 +48,9 @@ class RecordingRunner(Runner):
         call = tuple(argv)
         self.calls.append(call)
         self.environments.append(env)
+        if self.error is not None:
+            error, self.error = self.error, None
+            raise error
         result = self.responses.pop(0) if self.responses else Result(call, 0, "a" * 64 + "\n", "")
         if check and result.returncode != 0:
             raise CommandError(result)
@@ -1579,8 +1583,15 @@ def test_remaining_bounded_docker_operations_construct_exact_argv(
     docker.connect_network(network, container)
     docker.start(container)
     docker.stop(container)
-    runner.responses = [Result(("docker",), 0, "line\n", "warning\n")]
-    assert docker.logs(container, follow=True).stdout == "line\n"
+    timed_out = Result(("docker", "logs"), 124, "line\n", "warning\n")
+    runner.error = CommandTimeout(timed_out, 300)
+    followed = docker.logs(container, follow=True)
+    assert followed.returncode == 0
+    assert followed.stdout == "line\n"
+    assert followed.stderr == "warning\n"
+    runner.error = CommandTimeout(timed_out, 300)
+    with pytest.raises(CommandTimeout, match="timed out"):
+        docker.logs(container, follow=False)
     runner.responses = [Result(("docker",), 1, "", "daemon unavailable\n")]
     with pytest.raises(CommandError, match="daemon unavailable"):
         docker.logs(container, follow=False)

@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 from .errors import IntegrityError, PolicyError, PreflightError
 from .models import DIGEST, OCI_NAME, EphemeralMount
-from .process import Result, Runner
+from .process import CommandTimeout, Result, Runner
 from .state import ResourceRecord, RunState
 
 OWNER = "org.vulndockyard.managed"
@@ -1578,7 +1578,12 @@ class Docker:
             args.append("--follow")
         args.append(record.object_id)
         # Following is intentionally bounded as well; users can repeat it.
-        return self._run(tuple(args), timeout=300)
+        try:
+            return self._run(tuple(args), timeout=300)
+        except CommandTimeout as exc:
+            if not follow:
+                raise
+            return Result(exc.result.argv, 0, exc.result.stdout, exc.result.stderr)
 
     def remove_image(self, reference: str) -> None:
         parse_image_reference(reference)

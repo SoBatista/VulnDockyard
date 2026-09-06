@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,7 @@ def test_manager_atomic_update_preserves_mode(tmp_path: Path) -> None:
     manager = HostsManager(path)
     preview = manager.preview("juice-shop.test", add=True)
     assert preview.changed
+    assert preview.before_sha256 == hashlib.sha256(original).hexdigest()
     assert preview.before_block == ""
     assert preview.after_block == BEGIN + "127.0.0.1\tjuice-shop.test\n" + END
     manager.apply("juice-shop.test", add=True)
@@ -154,3 +156,40 @@ def test_manager_aggregates_a_multi_hostname_preview_and_apply(tmp_path: Path) -
     applied = manager.apply_many(("webgoat.test", "juice-shop.test"), add=True)
     assert applied.after_block == preview.after_block
     assert manager.managed_hosts() == preview.after
+
+
+def test_manager_binds_apply_to_the_confirmed_preview(tmp_path: Path) -> None:
+    path = tmp_path / "hosts"
+    original = b"127.0.0.1 localhost\n"
+    path.write_bytes(original)
+    path.chmod(0o600)
+    manager = HostsManager(path)
+    preview = manager.preview_many(("juice-shop.test", "webgoat.test"), add=True)
+    path.write_bytes(original + b"# concurrent unrelated edit\n")
+    path.chmod(0o600)
+
+    with pytest.raises(PolicyError, match="confirmed preview"):
+        manager.apply_many(
+            ("juice-shop.test", "webgoat.test"),
+            add=True,
+            expected_before_sha256=preview.before_sha256,
+            expected_after=preview.after,
+        )
+
+    assert path.read_bytes().endswith(b"# concurrent unrelated edit\n")
+
+
+def test_manager_rejects_a_changed_confirmed_target(tmp_path: Path) -> None:
+    path = tmp_path / "hosts"
+    path.write_bytes(b"127.0.0.1 localhost\n")
+    path.chmod(0o600)
+    manager = HostsManager(path)
+    preview = manager.preview_many(("juice-shop.test",), add=True)
+
+    with pytest.raises(PolicyError, match="confirmed preview"):
+        manager.apply_many(
+            ("juice-shop.test",),
+            add=True,
+            expected_before_sha256=preview.before_sha256,
+            expected_after=("webgoat.test",),
+        )

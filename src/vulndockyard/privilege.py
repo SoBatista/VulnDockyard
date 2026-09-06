@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 from importlib import resources
 from pathlib import Path
@@ -11,7 +12,7 @@ from pathlib import Path
 from .errors import PreflightError
 from .process import Runner
 
-HELPER_SHA256 = "8ad150841772841e3e20219f143d915b87a0ade9a96c5e53bfd0a2c2e7e60b9e"
+HELPER_SHA256 = "61fc6c54f51d7f17897e43c60dde0633fb3ec5e13ded661fc7e91709b3404586"
 HELPER_PATHS = (
     Path("/usr/local/libexec/vulndockyard-hosts"),
     Path("/usr/libexec/vulndockyard-hosts"),
@@ -81,11 +82,21 @@ def _root_executable(candidates: tuple[Path, ...], *, checksum: str | None = Non
     raise PreflightError("the root-owned VulnDockyard hosts helper is not installed")
 
 
-def invoke_hosts_helper(action: str, hostname: str, runner: Runner | None = None) -> None:
-    if action not in {"add", "remove"}:
-        raise ValueError("invalid hosts-helper action")
+def invoke_hosts_helper(
+    expected_before_sha256: str,
+    hostnames: tuple[str, ...],
+    runner: Runner | None = None,
+) -> None:
+    if re.fullmatch(r"[0-9a-f]{64}", expected_before_sha256) is None:
+        raise ValueError("invalid hosts-helper checksum")
+    if (
+        len(hostnames) > 256
+        or tuple(sorted(set(hostnames))) != hostnames
+        or any(re.fullmatch(r"[a-z][a-z0-9-]{0,61}\.test", value) is None for value in hostnames)
+    ):
+        raise ValueError("invalid hosts-helper hostname set")
     helper = _root_executable(HELPER_PATHS, checksum=HELPER_SHA256)
-    command = [str(helper), action, hostname]
+    command = [str(helper), "replace", expected_before_sha256, *hostnames]
     if os.geteuid() != 0:
         sudo = _root_executable(SUDO_PATHS)
         command = [str(sudo), "--", *command]

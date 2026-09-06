@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import stat
@@ -114,6 +115,8 @@ class HostsPreview:
     changed: bool
     before_block: str
     after_block: str
+    before_sha256: str
+    after_sha256: str
 
 
 def _fingerprint(info: os.stat_result) -> tuple[int, ...]:
@@ -203,6 +206,8 @@ class HostsManager:
             before != after,
             _block_text(content),
             _block_text(updated),
+            hashlib.sha256(content).hexdigest(),
+            hashlib.sha256(updated).hexdigest(),
         )
 
     def managed_hosts(self) -> tuple[str, ...]:
@@ -212,15 +217,31 @@ class HostsManager:
     def apply(self, hostname: str, *, add: bool) -> HostsPreview:
         return self.apply_many((hostname,), add=add)
 
-    def apply_many(self, hostnames: tuple[str, ...], *, add: bool) -> HostsPreview:
+    def apply_many(
+        self,
+        hostnames: tuple[str, ...],
+        *,
+        add: bool,
+        expected_before_sha256: str | None = None,
+        expected_after: tuple[str, ...] | None = None,
+    ) -> HostsPreview:
         info, content = self._snapshot()
+        before_sha256 = hashlib.sha256(content).hexdigest()
+        if expected_before_sha256 is not None:
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_before_sha256):
+                raise IntegrityError("expected hosts-file checksum is malformed")
+            if before_sha256 != expected_before_sha256:
+                raise PolicyError("hosts file changed after the confirmed preview")
         before = parse_managed_hosts(content)
         values = set(before)
         if any(HOSTNAME.fullmatch(hostname) is None for hostname in hostnames):
             raise IntegrityError("managed hostname is not a lowercase .test name")
         values.update(hostnames) if add else values.difference_update(hostnames)
         after = tuple(sorted(values))
+        if expected_after is not None and after != expected_after:
+            raise PolicyError("hosts update no longer matches the confirmed preview")
         updated = transform_hosts(content, after)
+        after_sha256 = hashlib.sha256(updated).hexdigest()
         if updated == content:
             return HostsPreview(
                 before,
@@ -228,6 +249,8 @@ class HostsManager:
                 False,
                 _block_text(content),
                 _block_text(updated),
+                before_sha256,
+                after_sha256,
             )
         directory = self.path.parent
         descriptor, temporary = tempfile.mkstemp(prefix=".vulndockyard-hosts-", dir=directory)
@@ -260,4 +283,6 @@ class HostsManager:
             True,
             _block_text(content),
             _block_text(updated),
+            before_sha256,
+            after_sha256,
         )

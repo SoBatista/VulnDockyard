@@ -9,7 +9,7 @@ import pytest
 
 from vulndockyard.errors import PreflightError
 from vulndockyard.output import Output, terminal_safe
-from vulndockyard.process import CommandError, Result, Runner
+from vulndockyard.process import CommandError, CommandTimeout, Result, Runner
 
 
 def test_output_human_and_json_contract() -> None:
@@ -65,6 +65,20 @@ def test_runner_failure_missing_binary_timeout_and_invalid_argv() -> None:
         Runner(max_output_bytes=0)
     with pytest.raises(ValueError, match="termination grace"):
         Runner(terminate_grace=0)
+
+
+def test_runner_timeout_retains_bounded_captured_output() -> None:
+    with pytest.raises(CommandTimeout) as timeout:
+        Runner(terminate_grace=0.1).run(
+            (
+                sys.executable,
+                "-c",
+                "import sys,time; print('followed', flush=True); time.sleep(10)",
+            ),
+            timeout=0.5,
+        )
+    assert timeout.value.result.returncode == 124
+    assert timeout.value.result.stdout == "followed\n"
 
 
 def test_runner_bounds_combined_subprocess_output() -> None:
