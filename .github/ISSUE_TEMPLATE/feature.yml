@@ -1,0 +1,17 @@
+name: Feature request
+description: Propose a controller, safety, or automation improvement.
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and proposed outcome
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and compatibility considerations
+    validations:
+      required: true

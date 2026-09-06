@@ -1,0 +1,23 @@
+name: Lab adapter proposal
+description: Propose a provenance-reviewed lab adapter or update.
+title: "adapter: "
+labels: [adapter]
+body:
+  - type: input
+    id: upstream
+    attributes:
+      label: Canonical upstream repository
+    validations:
+      required: true
+  - type: input
+    id: image
+    attributes:
+      label: Maintainer-published image and immutable digest
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Origin, license, architecture, safety, and smoke-test evidence
+    validations:
+      required: true
