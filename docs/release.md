@@ -1,5 +1,12 @@
 # Release and repository operations
 
+Version 1.0.0 is the target first release and has not been released. While its
+gates remain incomplete, the README identifies it as an unreleased target and
+its notes remain under `[Unreleased]` in the changelog. The final reviewed
+release change must move those notes to one dated `[1.0.0]` section, change the
+README projection to a released version, and pass every release gate. No tag,
+GitHub Release, package, or image may be published from the target state.
+
 `src/vulndockyard/_version.py` is authoritative. `VERSION`, package metadata,
 CLI output, README, and changelog are checked projections. Releases use SemVer,
 Keep a Changelog, reviewed PR version state, and exactly one release-impact label.

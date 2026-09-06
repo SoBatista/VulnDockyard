@@ -39,7 +39,7 @@ def _run(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str
 
 
 def _release_context() -> tuple[str, str]:
-    version = version_tools.check()
+    version = version_tools.check_release_ready()
     if os.environ.get("VDY_RELEASE_VERSION") != version:
         raise RuntimeError("workflow input does not match the authoritative stable version")
     if os.environ.get("VDY_CONFIRM") != f"publish-v{version}":

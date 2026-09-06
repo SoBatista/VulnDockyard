@@ -7,7 +7,7 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-09-06
+Target release: 1.0.0 (not yet released).
 
 ### Added
 
@@ -26,5 +26,4 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Apache-2.0 OSS governance, security, maintenance, CI, release, SBOM, and
   post-publication verification foundations.
 
-[Unreleased]: https://github.com/SoBatista/VulnDockyard/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/SoBatista/VulnDockyard/releases/tag/v1.0.0
+[Unreleased]: https://github.com/SoBatista/VulnDockyard/commits/main

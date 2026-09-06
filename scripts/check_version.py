@@ -24,6 +24,46 @@ def authoritative_version() -> str:
     return str(matches[0])
 
 
+def _projection_state(version: str, readme: str, changelog: str) -> str:
+    target_readme = (
+        f"target--version-{version}-orange" in readme
+        and f"Target version: `{version}` (unreleased; release gates incomplete)." in readme
+    )
+    released_readme = f"version-{version}-blue" in readme and f"Version: `{version}`" in readme
+    target_changelog = (
+        f"Target release: {version} (not yet released)." in changelog
+        and f"## [{version}]" not in changelog
+        and changelog.count("[Unreleased]: https://github.com/SoBatista/VulnDockyard/commits/main")
+        == 1
+        and f"[{version}]:" not in changelog
+    )
+    release_heading = re.search(
+        rf"^## \[{re.escape(version)}\] - (?P<date>\d{{4}}-\d{{2}}-\d{{2}})$",
+        changelog,
+        flags=re.MULTILINE,
+    )
+    released_changelog = release_heading is not None and all(
+        changelog.count(expected) == 1
+        for expected in (
+            f"[Unreleased]: https://github.com/SoBatista/VulnDockyard/compare/v{version}...HEAD",
+            f"[{version}]: https://github.com/SoBatista/VulnDockyard/releases/tag/v{version}",
+        )
+    )
+    if target_readme and target_changelog and not released_readme:
+        return "target"
+    if released_readme and released_changelog and not target_readme:
+        assert release_heading is not None
+        try:
+            date.fromisoformat(release_heading.group("date"))
+        except ValueError as exc:
+            raise RuntimeError("changelog release date is not a calendar date") from exc
+        return "released"
+    raise RuntimeError(
+        "README and changelog must consistently describe either an unreleased target or a "
+        "dated release"
+    )
+
+
 def check() -> str:
     version = authoritative_version()
     failures: list[str] = []
@@ -35,33 +75,13 @@ def check() -> str:
     ):
         failures.append("package metadata does not project the authoritative source")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    for expected in (f"version-{version}-blue", f"Version: `{version}`"):
-        if expected not in readme:
-            failures.append(f"README version projection is missing: {expected}")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    if changelog.count(f"## [{version}]") != 1:
-        failures.append("changelog must contain exactly one current version section")
     if changelog.count("## [Unreleased]") != 1:
         failures.append("changelog must contain exactly one Unreleased section")
-    release_heading = re.search(
-        rf"^## \[{re.escape(version)}\] - (?P<date>\d{{4}}-\d{{2}}-\d{{2}})$",
-        changelog,
-        flags=re.MULTILINE,
-    )
-    if release_heading is None:
-        failures.append("changelog current version needs one dated release heading")
-    else:
-        try:
-            date.fromisoformat(release_heading.group("date"))
-        except ValueError:
-            failures.append("changelog release date is not a calendar date")
-    expected_links = (
-        f"[Unreleased]: https://github.com/SoBatista/VulnDockyard/compare/v{version}...HEAD",
-        f"[{version}]: https://github.com/SoBatista/VulnDockyard/releases/tag/v{version}",
-    )
-    for expected in expected_links:
-        if changelog.count(expected) != 1:
-            failures.append(f"changelog version projection is missing: {expected}")
+    try:
+        _projection_state(version, readme, changelog)
+    except RuntimeError as exc:
+        failures.append(str(exc))
     spec = importlib.util.spec_from_file_location(
         "vulndockyard_version", ROOT / "src" / "vulndockyard" / "_version.py"
     )
@@ -74,6 +94,18 @@ def check() -> str:
             failures.append("CLI version does not match")
     if failures:
         raise RuntimeError("; ".join(failures))
+    return version
+
+
+def check_release_ready() -> str:
+    version = check()
+    state = _projection_state(
+        version,
+        (ROOT / "README.md").read_text(encoding="utf-8"),
+        (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"),
+    )
+    if state != "released":
+        raise RuntimeError(f"version {version} is an unreleased target, not publication-ready")
     return version
 
 

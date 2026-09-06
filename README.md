@@ -1,6 +1,6 @@
 # VulnDockyard
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/SoBatista/VulnDockyard/releases)
+[![Target version](https://img.shields.io/badge/target--version-1.0.0-orange)](CHANGELOG.md)
 
 > **Danger:** VulnDockyard runs intentionally vulnerable software. Use it only
 > on a local system you control. The controller binds its gateway to loopback,
@@ -9,7 +9,7 @@
 
 A provenance-aware local runner for intentionally vulnerable security labs.
 
-Version: `1.0.0`
+Target version: `1.0.0` (unreleased; release gates incomplete).
 
 ## Quick start
 
@@ -47,12 +47,13 @@ changes the interface or port.
 Never run a virtual-environment or editable-install Python entry point with
 `sudo`. Hosts changes cross a deliberately narrow privilege boundary: the CLI
 will invoke only a root-owned, non-writable helper whose exact SHA-256 matches
-this controller release. `vulndockyard hosts helper` reports the packaged source,
+this controller version. `vulndockyard hosts helper` reports the packaged source,
 required checksum, and fixed installation location for inspection.
 
-For a standalone release install, download a release wheel and its checksum,
-verify the checksum as described in [release verification](docs/release.md),
-then run `python -m pip install vulndockyard-1.0.0-py3-none-any.whl`.
+After `v1.0.0` is published, a standalone release install will use the release
+wheel and checksum described in [release verification](docs/release.md). Until
+then, use the development installation above; no public package or release is
+being claimed by this tree.
 
 Docker necessarily caches pulled image layers in Docker's own storage. `remove`
 keeps those layers. `purge LAB --images --yes` removes only the exact reviewed

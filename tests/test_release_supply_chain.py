@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from scripts.check_repository import _dependency_lock_failures
 from scripts.check_version import check as check_version
+from scripts.check_version import check_release_ready
 from scripts.check_workflows import check as check_workflows
 from scripts.generate_sbom import generate
 from scripts.release import _expected_artifacts, _release_metadata, _verify_sums
@@ -19,6 +20,11 @@ def test_dependency_lock_matches_uv_lock() -> None:
 
 def test_every_canonical_version_projection_is_consistent() -> None:
     assert check_version() == "1.0.0"
+
+
+def test_unreleased_target_cannot_enter_publication_workflow() -> None:
+    with pytest.raises(RuntimeError, match="unreleased target, not publication-ready"):
+        check_release_ready()
 
 
 def test_workflow_supply_chain_policy() -> None:
