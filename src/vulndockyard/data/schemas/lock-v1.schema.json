@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/SoBatista/VulnDockyard/raw/main/src/vulndockyard/data/schemas/lock-v1.schema.json",
+  "title": "VulnDockyard immutable lab lock v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "lab_id",
+    "lab_version",
+    "upstream_release",
+    "upstream_commit",
+    "images",
+    "template_sha256",
+    "source_sha256",
+    "build_recipe_revision",
+    "trust_evidence",
+    "verified_at",
+    "verified_platforms"
+  ],
+  "$defs": {
+    "strings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "digest",
+        "architectures",
+        "role"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^@\\s]+$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "architectures": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "linux/amd64",
+              "linux/arm64",
+              "linux/arm/v7"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "lab_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,62}$"
+    },
+    "lab_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "upstream_release": {
+      "type": "string",
+      "minLength": 1
+    },
+    "upstream_commit": {
+      "type": "string",
+      "pattern": "^(|[0-9a-f]{40})$"
+    },
+    "images": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/image"
+      }
+    },
+    "template_sha256": {
+      "type": "string",
+      "pattern": "^(|sha256:[0-9a-f]{64})$"
+    },
+    "source_sha256": {
+      "type": "string",
+      "pattern": "^(|sha256:[0-9a-f]{64})$"
+    },
+    "build_recipe_revision": {
+      "type": "string"
+    },
+    "trust_evidence": {
+      "$ref": "#/$defs/strings"
+    },
+    "verified_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "verified_platforms": {
+      "$ref": "#/$defs/strings"
+    }
+  }
+}

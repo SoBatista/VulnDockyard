@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "lab_id": "security-shepherd",
+  "lab_version": "3.1",
+  "upstream_release": "v3.1",
+  "upstream_commit": "d5c716629a9ff66b9dce2360e7b11a0c34bc9674",
+  "images": [],
+  "template_sha256": "",
+  "source_sha256": "",
+  "build_recipe_revision": "",
+  "trust_evidence": [
+    "https://github.com/OWASP/SecurityShepherd/blob/dev/docker-compose.yml"
+  ],
+  "verified_at": "2026-09-06T00:00:00Z",
+  "verified_platforms": []
+}
+

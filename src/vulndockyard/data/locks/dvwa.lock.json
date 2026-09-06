@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "lab_id": "dvwa",
+  "lab_version": "209930b",
+  "upstream_release": "209930b",
+  "upstream_commit": "209930b26ef16b1636dfac74ca49b5557fd0528e",
+  "images": [],
+  "template_sha256": "",
+  "source_sha256": "",
+  "build_recipe_revision": "",
+  "trust_evidence": [
+    "https://github.com/digininja/DVWA/blob/209930b26ef16b1636dfac74ca49b5557fd0528e/.github/workflows/docker-image.yml"
+  ],
+  "verified_at": "2026-09-06T00:00:00Z",
+  "verified_platforms": []
+}
+

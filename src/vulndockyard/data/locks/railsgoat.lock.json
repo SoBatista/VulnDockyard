@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "lab_id": "railsgoat",
+  "lab_version": "main",
+  "upstream_release": "main",
+  "upstream_commit": "0222f7da3406ba3ab637bc6d24ae9366b5f0a680",
+  "images": [],
+  "template_sha256": "",
+  "source_sha256": "",
+  "build_recipe_revision": "",
+  "trust_evidence": [
+    "https://github.com/OWASP/railsgoat/blob/main/docker-compose.yml"
+  ],
+  "verified_at": "2026-09-06T00:00:00Z",
+  "verified_platforms": []
+}
+

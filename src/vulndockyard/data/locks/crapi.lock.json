@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "lab_id": "crapi",
+  "lab_version": "1.1.6",
+  "upstream_release": "v1.1.6",
+  "upstream_commit": "700f03d12a392d9e408260b4beae72ed02a4a1a4",
+  "images": [],
+  "template_sha256": "",
+  "source_sha256": "",
+  "build_recipe_revision": "",
+  "trust_evidence": [
+    "https://github.com/OWASP/crAPI/blob/main/.github/workflows/publish.yml"
+  ],
+  "verified_at": "2026-09-06T00:00:00Z",
+  "verified_platforms": []
+}
+

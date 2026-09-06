@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "lab_id": "bwapp",
+  "lab_version": "2.2",
+  "upstream_release": "2.2",
+  "upstream_commit": "",
+  "images": [],
+  "template_sha256": "",
+  "source_sha256": "",
+  "build_recipe_revision": "",
+  "trust_evidence": [
+    "https://sourceforge.net/projects/bwapp/"
+  ],
+  "verified_at": "2026-09-06T00:00:00Z",
+  "verified_platforms": []
+}
+

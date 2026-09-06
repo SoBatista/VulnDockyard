@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "id": "webgoat",
+  "display_name": "OWASP WebGoat and WebWolf",
+  "description": "Interactive lesson platform paired with the WebWolf helper application.",
+  "categories": [
+    "web",
+    "owasp",
+    "java"
+  ],
+  "runtime_backend": "docker-engine",
+  "upstream": {
+    "repository": "https://github.com/WebGoat/WebGoat",
+    "homepage": "https://owasp.org/www-project-webgoat/"
+  },
+  "version": {
+    "release": "2025.3",
+    "tag": "v2025.3",
+    "commit": "c3ed45a733377bc7313b93f57ff518254d81380f"
+  },
+  "license": {
+    "spdx": "GPL-2.0-or-later",
+    "evidence_url": "https://github.com/WebGoat/WebGoat/blob/v2025.3/LICENSE.txt",
+    "redistribution": "Upstream image would be pulled; redistribution of modifications must satisfy GPL-2.0-or-later."
+  },
+  "trust": {
+    "level": "quarantined",
+    "evidence": [
+      "https://github.com/WebGoat/WebGoat/blob/v2025.3/.github/workflows/release.yml"
+    ],
+    "limitations": [
+      "Provenance, containment, licensing, architecture, or functionality review is incomplete."
+    ],
+    "status_reason": "Exact image digest is known, but dual-application registration, WebWolf tooling, reset, and containment have not completed local smoke verification."
+  },
+  "images": [
+    {
+      "name": "docker.io/webgoat/webgoat",
+      "digest": "sha256:3101bd9e7bcfe122d7ef91e690ef3720de36cc4e86b3d06763a1ddf2e2751a4b",
+      "architectures": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "role": "application"
+    }
+  ],
+  "services": [
+    {
+      "name": "webgoat",
+      "image_role": "application",
+      "internal_port": 8080,
+      "protocol": "http",
+      "health_path": "/WebGoat/actuator/health",
+      "identity_regex": "UP"
+    },
+    {
+      "name": "webwolf",
+      "image_role": "application",
+      "internal_port": 9090,
+      "protocol": "http",
+      "health_path": "/WebWolf",
+      "identity_regex": "WebWolf"
+    }
+  ],
+  "friendly_hostname": "webgoat.test",
+  "health_check": {
+    "type": "http-identity-and-functionality",
+    "checks": [
+      "WebGoat actuator is healthy",
+      "WebWolf identity page is usable"
+    ],
+    "timeout_seconds": 120
+  },
+  "initialization": {
+    "automatic": false,
+    "steps": [
+      "Register a user; the same account authenticates to WebWolf"
+    ]
+  },
+  "reset": {
+    "strategy": "Recreate the owned container",
+    "effects": []
+  },
+  "default_credentials": [],
+  "resources": {
+    "memory_mb": 1024,
+    "cpus": 1,
+    "pids": 384,
+    "read_only_root": false
+  },
+  "persistence": {
+    "required": false,
+    "volumes": []
+  },
+  "outbound_network": {
+    "required": false,
+    "reason": "Official guidance recommends disconnecting it from the Internet.",
+    "challenge_dependencies": []
+  },
+  "dangerous_capabilities": [],
+  "expected_functionality": [
+    "Guided WebGoat lessons",
+    "WebWolf upload, mailbox, JWT, and request tools"
+  ],
+  "known_limitations": [
+    "Timezone-sensitive JWT lessons require explicit timezone handling",
+    "Gateway must preserve /WebGoat and /WebWolf paths"
+  ],
+  "last_verified": "2026-09-06",
+  "adapter_status": "quarantined",
+  "verification": {
+    "status": "blocked",
+    "platforms": [],
+    "evidence": []
+  },
+  "taxonomy": {
+    "owasp": [
+      "OWASP Top 10"
+    ],
+    "cwe": [],
+    "cve": []
+  },
+  "references": [
+    "https://github.com/WebGoat/WebGoat"
+  ]
+}
+

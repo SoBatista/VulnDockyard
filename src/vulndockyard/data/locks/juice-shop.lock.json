@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "lab_id": "juice-shop",
+  "lab_version": "20.2.0",
+  "upstream_release": "v20.2.0",
+  "upstream_commit": "5658473cf8814459bf89000ce373b20ed0b4eb37",
+  "images": [
+    {
+      "name": "docker.io/bkimminich/juice-shop",
+      "digest": "sha256:8739101ade29358abb5469ee66ae78e582c97ed0a5543a4ad102e5fa5193526b",
+      "architectures": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "role": "application"
+    },
+    {
+      "name": "docker.io/library/caddy",
+      "digest": "sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d",
+      "architectures": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "role": "gateway"
+    }
+  ],
+  "template_sha256": "",
+  "source_sha256": "",
+  "build_recipe_revision": "",
+  "trust_evidence": [
+    "https://github.com/juice-shop/juice-shop/blob/v20.2.0/.github/workflows/release.yml",
+    "https://hub.docker.com/v2/repositories/bkimminich/juice-shop/tags/v20.2.0",
+    "https://github.com/docker-library/official-images/blob/master/library/caddy",
+    "https://hub.docker.com/_/caddy"
+  ],
+  "verified_at": "2026-09-06T11:03:23Z",
+  "verified_platforms": [
+    "linux/amd64"
+  ]
+}

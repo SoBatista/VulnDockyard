@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "id": "juice-shop",
+  "display_name": "OWASP Juice Shop",
+  "description": "Modern intentionally insecure web application covering the OWASP Top Ten and more.",
+  "categories": [
+    "web",
+    "owasp",
+    "javascript"
+  ],
+  "runtime_backend": "docker-engine",
+  "upstream": {
+    "repository": "https://github.com/juice-shop/juice-shop",
+    "homepage": "https://owasp.org/www-project-juice-shop/"
+  },
+  "version": {
+    "release": "20.2.0",
+    "tag": "v20.2.0",
+    "commit": "5658473cf8814459bf89000ce373b20ed0b4eb37"
+  },
+  "license": {
+    "spdx": "MIT",
+    "evidence_url": "https://github.com/juice-shop/juice-shop/blob/v20.2.0/LICENSE",
+    "redistribution": "Upstream image is pulled, not redistributed; MIT permits redistribution with notice."
+  },
+  "trust": {
+    "level": "upstream-pinned",
+    "evidence": [
+      "https://github.com/juice-shop/juice-shop/blob/v20.2.0/.github/workflows/release.yml",
+      "https://hub.docker.com/v2/repositories/bkimminich/juice-shop/tags/v20.2.0",
+      "https://github.com/docker-library/official-images/blob/master/library/caddy",
+      "https://hub.docker.com/_/caddy"
+    ],
+    "limitations": [
+      "Digest pinning provides immutability, not publisher signature identity."
+    ],
+    "status_reason": "Official versioned image is produced by canonical release automation; digest is locked, but no verified publisher signature is available."
+  },
+  "images": [
+    {
+      "name": "docker.io/bkimminich/juice-shop",
+      "digest": "sha256:8739101ade29358abb5469ee66ae78e582c97ed0a5543a4ad102e5fa5193526b",
+      "architectures": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "role": "application"
+    },
+    {
+      "name": "docker.io/library/caddy",
+      "digest": "sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d",
+      "architectures": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "role": "gateway"
+    }
+  ],
+  "services": [
+    {
+      "name": "web",
+      "image_role": "application",
+      "internal_port": 3000,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_regex": "OWASP Juice Shop"
+    },
+    {
+      "name": "challenge-api",
+      "image_role": "application",
+      "internal_port": 3000,
+      "protocol": "http",
+      "health_path": "/api/Challenges",
+      "identity_regex": "passwordHashLeakChallenge"
+    }
+  ],
+  "friendly_hostname": "juice-shop.test",
+  "health_check": {
+    "type": "http-identity-and-functionality",
+    "checks": [
+      "Root contains OWASP Juice Shop identity",
+      "/api/Challenges returns the challenge inventory"
+    ],
+    "timeout_seconds": 120
+  },
+  "initialization": {
+    "automatic": true,
+    "steps": [
+      "Self-initializes on container start"
+    ]
+  },
+  "reset": {
+    "strategy": "Recreate owned containers; server-side data resets on restart",
+    "effects": []
+  },
+  "default_credentials": [],
+  "resources": {
+    "memory_mb": 512,
+    "cpus": 0.5,
+    "pids": 256,
+    "read_only_root": false
+  },
+  "persistence": {
+    "required": false,
+    "volumes": []
+  },
+  "outbound_network": {
+    "required": false,
+    "reason": "Core application functions on an internal Docker network.",
+    "challenge_dependencies": [
+      "AI/LLM challenges need an external provider",
+      "Some OSINT challenges need user-side Internet research"
+    ]
+  },
+  "dangerous_capabilities": [],
+  "expected_functionality": [
+    "Shop user interface",
+    "REST APIs and challenge inventory",
+    "Scoreboard, tutorial, and coding challenges"
+  ],
+  "known_limitations": [
+    "Docker Danger Zone challenges are disabled by upstream default",
+    "Client-side cookies can retain progress after server reset",
+    "Port 80 must be available unless an explicit alternate --port is selected"
+  ],
+  "last_verified": "2026-09-06",
+  "adapter_status": "runnable",
+  "verification": {
+    "status": "passed",
+    "platforms": [
+      "linux/amd64"
+    ],
+    "evidence": [
+      "local-smoke:linux-amd64:docker-engine-26.1.5:identity-and-lifecycle-passed:2026-09-06"
+    ]
+  },
+  "taxonomy": {
+    "owasp": [
+      "OWASP Top 10"
+    ],
+    "cwe": [],
+    "cve": []
+  },
+  "references": [
+    "https://pwning.owasp-juice.shop/companion-guide/latest/part1/running.html",
+    "https://pwning.owasp-juice.shop/companion-guide/latest/part1/challenges.html"
+  ]
+}

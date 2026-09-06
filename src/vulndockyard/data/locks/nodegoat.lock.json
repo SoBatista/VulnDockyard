@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "lab_id": "nodegoat",
+  "lab_version": "1.4",
+  "upstream_release": "v1.4",
+  "upstream_commit": "9e35cae25f5c6226c30c7d9b03987005affb2888",
+  "images": [],
+  "template_sha256": "",
+  "source_sha256": "",
+  "build_recipe_revision": "",
+  "trust_evidence": [
+    "https://github.com/OWASP/NodeGoat/blob/master/docker-compose.yml"
+  ],
+  "verified_at": "2026-09-06T00:00:00Z",
+  "verified_platforms": []
+}
+

@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "id": "security-shepherd",
+  "display_name": "OWASP Security Shepherd",
+  "description": "Web and mobile application security training platform.",
+  "categories": [
+    "web",
+    "mobile",
+    "java",
+    "owasp"
+  ],
+  "runtime_backend": "docker-engine",
+  "upstream": {
+    "repository": "https://github.com/OWASP/SecurityShepherd",
+    "homepage": "https://owasp.org/www-project-security-shepherd/"
+  },
+  "version": {
+    "release": "3.1",
+    "tag": "v3.1",
+    "commit": "d5c716629a9ff66b9dce2360e7b11a0c34bc9674"
+  },
+  "license": {
+    "spdx": "GPL-3.0-or-later",
+    "evidence_url": "https://github.com/OWASP/SecurityShepherd/blob/dev/LICENSE",
+    "redistribution": "A future project build must satisfy GPL source and corresponding-source obligations; none is authorized yet."
+  },
+  "trust": {
+    "level": "quarantined",
+    "evidence": [
+      "https://github.com/OWASP/SecurityShepherd/blob/dev/docker-compose.yml"
+    ],
+    "limitations": [
+      "Provenance, containment, licensing, architecture, or functionality review is incomplete."
+    ],
+    "status_reason": "No official remote OCI artifact exists; upstream deployment builds generated WAR, database, and Mongo images from mutable bases."
+  },
+  "images": [],
+  "services": [],
+  "friendly_hostname": "security-shepherd.test",
+  "health_check": {
+    "type": "http-identity-and-functionality",
+    "checks": [
+      "Post-setup HTTPS login identity",
+      "Challenge catalogue and per-user state usable"
+    ],
+    "timeout_seconds": 120
+  },
+  "initialization": {
+    "automatic": false,
+    "steps": [
+      "Build WAR and TLS material",
+      "Complete first-run database setup"
+    ]
+  },
+  "reset": {
+    "strategy": "Remove only owned MariaDB, MongoDB, Tomcat configuration, and log volumes",
+    "effects": [
+      "mariadb",
+      "mongodb",
+      "tomcat-config",
+      "logs"
+    ]
+  },
+  "default_credentials": [
+    "admin / password (mandatory change after first login)"
+  ],
+  "resources": {
+    "memory_mb": 4096,
+    "cpus": 2,
+    "pids": 1024,
+    "read_only_root": false
+  },
+  "persistence": {
+    "required": true,
+    "volumes": [
+      "mariadb",
+      "mongodb",
+      "tomcat-config",
+      "logs"
+    ]
+  },
+  "outbound_network": {
+    "required": false,
+    "reason": "Core web lessons have no documented Internet requirement.",
+    "challenge_dependencies": [
+      "Mobile challenges require Android artifacts, a device or emulator, and ADB"
+    ]
+  },
+  "dangerous_capabilities": [],
+  "expected_functionality": [
+    "Web lesson catalogue",
+    "CTF, tournament, progress, scoreboard, and administration modes"
+  ],
+  "known_limitations": [
+    "Self-signed TLS",
+    "Generated build artifacts are required",
+    "Mobile training is outside a web-container-only deployment"
+  ],
+  "last_verified": "2026-09-06",
+  "adapter_status": "quarantined",
+  "verification": {
+    "status": "blocked",
+    "platforms": [],
+    "evidence": []
+  },
+  "taxonomy": {
+    "owasp": [
+      "OWASP Top 10"
+    ],
+    "cwe": [],
+    "cve": []
+  },
+  "references": [
+    "https://github.com/OWASP/SecurityShepherd"
+  ]
+}
+

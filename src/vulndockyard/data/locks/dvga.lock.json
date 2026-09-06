@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "lab_id": "dvga",
+  "lab_version": "master",
+  "upstream_release": "latest",
+  "upstream_commit": "",
+  "images": [],
+  "template_sha256": "",
+  "source_sha256": "",
+  "build_recipe_revision": "",
+  "trust_evidence": [
+    "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application/blob/master/Dockerfile"
+  ],
+  "verified_at": "2026-09-06T00:00:00Z",
+  "verified_platforms": []
+}
+

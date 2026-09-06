@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "id": "dvga",
+  "display_name": "Damn Vulnerable GraphQL Application",
+  "description": "Intentionally vulnerable GraphQL training application.",
+  "categories": [
+    "api",
+    "graphql",
+    "python"
+  ],
+  "runtime_backend": "docker-engine",
+  "upstream": {
+    "repository": "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application",
+    "homepage": "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application"
+  },
+  "version": {
+    "release": "master",
+    "tag": "latest",
+    "commit": ""
+  },
+  "license": {
+    "spdx": "MIT",
+    "evidence_url": "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application/blob/master/LICENSE.md",
+    "redistribution": "Upstream image would be pulled; MIT permits redistribution with notice."
+  },
+  "trust": {
+    "level": "quarantined",
+    "evidence": [
+      "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application/blob/master/Dockerfile"
+    ],
+    "limitations": [
+      "Provenance, containment, licensing, architecture, or functionality review is incomplete."
+    ],
+    "status_reason": "Documented maintainer image lacks discoverable publication provenance, a reviewed digest, and GraphQL functionality smoke evidence."
+  },
+  "images": [
+    {
+      "name": "docker.io/dolevf/dvga",
+      "digest": "",
+      "architectures": [
+        "linux/amd64"
+      ],
+      "role": "application"
+    }
+  ],
+  "services": [
+    {
+      "name": "graphql",
+      "image_role": "application",
+      "internal_port": 5013,
+      "protocol": "http",
+      "health_path": "/graphiql",
+      "identity_regex": "GraphiQL"
+    }
+  ],
+  "friendly_hostname": "dvga.test",
+  "health_check": {
+    "type": "http-identity-and-functionality",
+    "checks": [
+      "Harmless GraphQL systemHealth query succeeds",
+      "GraphiQL and login modes are usable"
+    ],
+    "timeout_seconds": 120
+  },
+  "initialization": {
+    "automatic": false,
+    "steps": [
+      "Startup recreates SQLite and upload state"
+    ]
+  },
+  "reset": {
+    "strategy": "Recreate the owned container",
+    "effects": []
+  },
+  "default_credentials": [
+    "admin / changeme",
+    "operator / password123"
+  ],
+  "resources": {
+    "memory_mb": 512,
+    "cpus": 0.5,
+    "pids": 256,
+    "read_only_root": false
+  },
+  "persistence": {
+    "required": false,
+    "volumes": []
+  },
+  "outbound_network": {
+    "required": false,
+    "reason": "Core GraphQL training is local.",
+    "challenge_dependencies": [
+      "External SSRF targets require explicit egress or an internal fixture"
+    ]
+  },
+  "dangerous_capabilities": [],
+  "expected_functionality": [
+    "Queries, mutations, subscriptions, and GraphiQL",
+    "Beginner and expert modes"
+  ],
+  "known_limitations": [
+    "Only amd64 image evidence",
+    "No official image publication automation found"
+  ],
+  "last_verified": "2026-09-06",
+  "adapter_status": "quarantined",
+  "verification": {
+    "status": "blocked",
+    "platforms": [],
+    "evidence": []
+  },
+  "taxonomy": {
+    "owasp": [
+      "OWASP API Security Top 10"
+    ],
+    "cwe": [],
+    "cve": []
+  },
+  "references": [
+    "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application"
+  ]
+}
+

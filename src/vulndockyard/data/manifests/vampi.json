@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "id": "vampi",
+  "display_name": "VAmPI",
+  "description": "Vulnerable API built for OWASP API security testing and training.",
+  "categories": [
+    "api",
+    "python"
+  ],
+  "runtime_backend": "docker-engine",
+  "upstream": {
+    "repository": "https://github.com/erev0s/VAmPI",
+    "homepage": "https://github.com/erev0s/VAmPI"
+  },
+  "version": {
+    "release": "master",
+    "tag": "latest",
+    "commit": ""
+  },
+  "license": {
+    "spdx": "MIT",
+    "evidence_url": "https://github.com/erev0s/VAmPI/blob/master/LICENSE",
+    "redistribution": "Upstream image would be pulled; MIT permits redistribution with notice."
+  },
+  "trust": {
+    "level": "quarantined",
+    "evidence": [
+      "https://github.com/erev0s/VAmPI/blob/master/.github/workflows/docker-image.yml"
+    ],
+    "limitations": [
+      "Provenance, containment, licensing, architecture, or functionality review is incomplete."
+    ],
+    "status_reason": "Canonical automation publishes the image, but an immutable digest and seeded API functionality smoke evidence are not yet reviewed."
+  },
+  "images": [
+    {
+      "name": "docker.io/erev0s/vampi",
+      "digest": "",
+      "architectures": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "role": "application"
+    }
+  ],
+  "services": [
+    {
+      "name": "api",
+      "image_role": "application",
+      "internal_port": 5000,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_regex": "vulnerable"
+    }
+  ],
+  "friendly_hostname": "vampi.test",
+  "health_check": {
+    "type": "http-identity-and-functionality",
+    "checks": [
+      "Root identifies vulnerable mode",
+      "createdb succeeds",
+      "Swagger UI and seeded API call succeed"
+    ],
+    "timeout_seconds": 120
+  },
+  "initialization": {
+    "automatic": false,
+    "steps": [
+      "GET /createdb recreates and seeds SQLite"
+    ]
+  },
+  "reset": {
+    "strategy": "Call createdb or recreate the owned container",
+    "effects": []
+  },
+  "default_credentials": [
+    "name1 / pass1",
+    "name2 / pass2",
+    "admin / pass1"
+  ],
+  "resources": {
+    "memory_mb": 512,
+    "cpus": 0.5,
+    "pids": 256,
+    "read_only_root": false
+  },
+  "persistence": {
+    "required": false,
+    "volumes": []
+  },
+  "outbound_network": {
+    "required": false,
+    "reason": "Core API and documentation are local.",
+    "challenge_dependencies": []
+  },
+  "dangerous_capabilities": [],
+  "expected_functionality": [
+    "Swagger UI",
+    "OWASP API Top 10 exercises"
+  ],
+  "known_limitations": [
+    "No signed provenance",
+    "Default token lifetime is short"
+  ],
+  "last_verified": "2026-09-06",
+  "adapter_status": "quarantined",
+  "verification": {
+    "status": "blocked",
+    "platforms": [],
+    "evidence": []
+  },
+  "taxonomy": {
+    "owasp": [
+      "OWASP API Security Top 10"
+    ],
+    "cwe": [],
+    "cve": []
+  },
+  "references": [
+    "https://github.com/erev0s/VAmPI"
+  ]
+}
+

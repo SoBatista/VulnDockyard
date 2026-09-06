@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "lab_id": "webgoat",
+  "lab_version": "2025.3",
+  "upstream_release": "v2025.3",
+  "upstream_commit": "c3ed45a733377bc7313b93f57ff518254d81380f",
+  "images": [],
+  "template_sha256": "",
+  "source_sha256": "",
+  "build_recipe_revision": "",
+  "trust_evidence": [
+    "https://github.com/WebGoat/WebGoat/blob/v2025.3/.github/workflows/release.yml"
+  ],
+  "verified_at": "2026-09-06T00:00:00Z",
+  "verified_platforms": []
+}
+

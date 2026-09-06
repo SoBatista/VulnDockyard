@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "id": "railsgoat",
+  "display_name": "OWASP RailsGoat",
+  "description": "Vulnerable Ruby on Rails application and training material.",
+  "categories": [
+    "web",
+    "ruby",
+    "owasp"
+  ],
+  "runtime_backend": "docker-engine",
+  "upstream": {
+    "repository": "https://github.com/OWASP/railsgoat",
+    "homepage": "https://vwad.owasp.org/app/rails-goat/"
+  },
+  "version": {
+    "release": "main",
+    "tag": "main",
+    "commit": "0222f7da3406ba3ab637bc6d24ae9366b5f0a680"
+  },
+  "license": {
+    "spdx": "MIT",
+    "evidence_url": "https://github.com/OWASP/railsgoat/blob/main/LICENSE.md",
+    "redistribution": "A future project build is legally possible with MIT notice, but none is authorized until its build review passes."
+  },
+  "trust": {
+    "level": "quarantined",
+    "evidence": [
+      "https://github.com/OWASP/railsgoat/blob/main/docker-compose.yml"
+    ],
+    "limitations": [
+      "Provenance, containment, licensing, architecture, or functionality review is incomplete."
+    ],
+    "status_reason": "No upstream-published image exists; official Compose builds and broadly mounts source, and full lessons need unbundled MySQL and MailCatcher."
+  },
+  "images": [],
+  "services": [],
+  "friendly_hostname": "railsgoat.test",
+  "health_check": {
+    "type": "http-identity-and-functionality",
+    "checks": [
+      "Login identity and seeded database",
+      "MySQL-specific and mail exercises remain present"
+    ],
+    "timeout_seconds": 120
+  },
+  "initialization": {
+    "automatic": false,
+    "steps": [
+      "Run rails db:setup"
+    ]
+  },
+  "reset": {
+    "strategy": "Discard only owned database state and rerun db:setup",
+    "effects": [
+      "database"
+    ]
+  },
+  "default_credentials": [
+    "admin@metacorp.com / admin1234",
+    "jmmastey@metacorp.com / railsgoat!"
+  ],
+  "resources": {
+    "memory_mb": 1536,
+    "cpus": 2,
+    "pids": 512,
+    "read_only_root": false
+  },
+  "persistence": {
+    "required": true,
+    "volumes": [
+      "database"
+    ]
+  },
+  "outbound_network": {
+    "required": true,
+    "reason": "Official supply-chain lesson loads browser assets from jsDelivr.",
+    "challenge_dependencies": [
+      "MySQL is required for some SQL injection lessons",
+      "MailCatcher is needed for mail exercises"
+    ]
+  },
+  "dangerous_capabilities": [],
+  "expected_functionality": [
+    "Rails and OWASP Top 10 exercises",
+    "Tutorial content"
+  ],
+  "known_limitations": [
+    "Official Dockerfile is amd64-only",
+    "Broad source bind mount is forbidden",
+    "Some features are absent from upstream Compose"
+  ],
+  "last_verified": "2026-09-06",
+  "adapter_status": "quarantined",
+  "verification": {
+    "status": "blocked",
+    "platforms": [],
+    "evidence": []
+  },
+  "taxonomy": {
+    "owasp": [
+      "OWASP Top 10"
+    ],
+    "cwe": [],
+    "cve": []
+  },
+  "references": [
+    "https://github.com/OWASP/railsgoat"
+  ]
+}
+

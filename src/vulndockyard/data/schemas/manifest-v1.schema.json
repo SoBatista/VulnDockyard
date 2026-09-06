@@ -1,0 +1,494 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/SoBatista/VulnDockyard/raw/main/src/vulndockyard/data/schemas/manifest-v1.schema.json",
+  "title": "VulnDockyard reviewed lab manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "display_name",
+    "description",
+    "categories",
+    "runtime_backend",
+    "upstream",
+    "version",
+    "license",
+    "trust",
+    "images",
+    "services",
+    "friendly_hostname",
+    "health_check",
+    "initialization",
+    "reset",
+    "default_credentials",
+    "resources",
+    "persistence",
+    "outbound_network",
+    "dangerous_capabilities",
+    "expected_functionality",
+    "known_limitations",
+    "last_verified",
+    "adapter_status",
+    "verification",
+    "taxonomy",
+    "references"
+  ],
+  "$defs": {
+    "strings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "digest",
+        "architectures",
+        "role"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^@\\s]+$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(|sha256:[0-9a-f]{64})$"
+        },
+        "architectures": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "linux/amd64",
+              "linux/arm64",
+              "linux/arm/v7"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "image_role",
+        "internal_port",
+        "protocol",
+        "health_path",
+        "identity_regex"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "image_role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "internal_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "protocol": {
+          "enum": [
+            "http",
+            "https",
+            "tcp"
+          ]
+        },
+        "health_path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "identity_regex": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,62}$"
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "categories": {
+      "$ref": "#/$defs/strings"
+    },
+    "runtime_backend": {
+      "const": "docker-engine"
+    },
+    "upstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "homepage"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "homepage": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        }
+      }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "release",
+        "tag",
+        "commit"
+      ],
+      "properties": {
+        "release": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^(|[0-9a-f]{40})$"
+        }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spdx",
+        "evidence_url",
+        "redistribution"
+      ],
+      "properties": {
+        "spdx": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "redistribution": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "level",
+        "evidence",
+        "limitations",
+        "status_reason"
+      ],
+      "properties": {
+        "level": {
+          "enum": [
+            "upstream-signed",
+            "upstream-pinned",
+            "vulndockyard-built",
+            "quarantined"
+          ]
+        },
+        "evidence": {
+          "$ref": "#/$defs/strings"
+        },
+        "limitations": {
+          "$ref": "#/$defs/strings"
+        },
+        "status_reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "images": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/image"
+      }
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/service"
+      }
+    },
+    "friendly_hostname": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,61}\\.test$"
+    },
+    "health_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "checks",
+        "timeout_seconds"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "checks": {
+          "$ref": "#/$defs/strings"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 900
+        }
+      }
+    },
+    "initialization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "automatic",
+        "steps"
+      ],
+      "properties": {
+        "automatic": {
+          "type": "boolean"
+        },
+        "steps": {
+          "$ref": "#/$defs/strings"
+        }
+      }
+    },
+    "reset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy",
+        "effects"
+      ],
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effects": {
+          "$ref": "#/$defs/strings"
+        }
+      }
+    },
+    "default_credentials": {
+      "$ref": "#/$defs/strings"
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memory_mb",
+        "cpus",
+        "pids",
+        "read_only_root"
+      ],
+      "properties": {
+        "memory_mb": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 131072
+        },
+        "cpus": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 64
+        },
+        "pids": {
+          "type": "integer",
+          "minimum": 16,
+          "maximum": 32768
+        },
+        "read_only_root": {
+          "type": "boolean"
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "volumes"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "volumes": {
+          "$ref": "#/$defs/strings"
+        }
+      }
+    },
+    "outbound_network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "reason",
+        "challenge_dependencies"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "challenge_dependencies": {
+          "$ref": "#/$defs/strings"
+        }
+      }
+    },
+    "dangerous_capabilities": {
+      "$ref": "#/$defs/strings"
+    },
+    "expected_functionality": {
+      "$ref": "#/$defs/strings"
+    },
+    "known_limitations": {
+      "$ref": "#/$defs/strings"
+    },
+    "last_verified": {
+      "type": "string",
+      "format": "date"
+    },
+    "adapter_status": {
+      "enum": [
+        "runnable",
+        "quarantined",
+        "unavailable"
+      ]
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "platforms",
+        "evidence"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "passed",
+            "blocked"
+          ]
+        },
+        "platforms": {
+          "$ref": "#/$defs/strings"
+        },
+        "evidence": {
+          "$ref": "#/$defs/strings"
+        }
+      }
+    },
+    "taxonomy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "owasp",
+        "cwe",
+        "cve"
+      ],
+      "properties": {
+        "owasp": {
+          "$ref": "#/$defs/strings"
+        },
+        "cwe": {
+          "$ref": "#/$defs/strings"
+        },
+        "cve": {
+          "$ref": "#/$defs/strings"
+        }
+      }
+    },
+    "references": {
+      "$ref": "#/$defs/strings"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "adapter_status": {
+            "const": "runnable"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "images": {
+            "minItems": 1,
+            "items": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/image"
+                },
+                {
+                  "properties": {
+                    "digest": {
+                      "pattern": "^sha256:[0-9a-f]{64}$"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "services": {
+            "minItems": 1
+          },
+          "verification": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

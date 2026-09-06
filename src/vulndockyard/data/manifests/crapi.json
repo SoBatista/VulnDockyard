@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "id": "crapi",
+  "display_name": "OWASP crAPI",
+  "description": "Multi-service intentionally vulnerable API application.",
+  "categories": [
+    "api",
+    "owasp",
+    "microservices"
+  ],
+  "runtime_backend": "docker-engine",
+  "upstream": {
+    "repository": "https://github.com/OWASP/crAPI",
+    "homepage": "https://owasp.org/www-project-crapi/"
+  },
+  "version": {
+    "release": "1.1.6",
+    "tag": "v1.1.6",
+    "commit": "700f03d12a392d9e408260b4beae72ed02a4a1a4"
+  },
+  "license": {
+    "spdx": "Apache-2.0",
+    "evidence_url": "https://github.com/OWASP/crAPI/blob/main/LICENSE.md",
+    "redistribution": "Upstream images would be pulled; source is Apache-2.0, while every third-party service retains its own license."
+  },
+  "trust": {
+    "level": "quarantined",
+    "evidence": [
+      "https://github.com/OWASP/crAPI/blob/main/.github/workflows/publish.yml"
+    ],
+    "limitations": [
+      "Provenance, containment, licensing, architecture, or functionality review is incomplete."
+    ],
+    "status_reason": "Stable source release does not map to a stable complete image set; the ten-image stack and happy path remain unverified together."
+  },
+  "images": [
+    {
+      "name": "docker.io/crapi/crapi-web",
+      "digest": "",
+      "architectures": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "role": "application"
+    }
+  ],
+  "services": [
+    {
+      "name": "web",
+      "image_role": "application",
+      "internal_port": 80,
+      "protocol": "http",
+      "health_path": "/health",
+      "identity_regex": "healthy"
+    }
+  ],
+  "friendly_hostname": "crapi.test",
+  "health_check": {
+    "type": "http-identity-and-functionality",
+    "checks": [
+      "All ten services pass health checks",
+      "Signup, local mail, authentication, and happy path succeed"
+    ],
+    "timeout_seconds": 120
+  },
+  "initialization": {
+    "automatic": false,
+    "steps": [
+      "Automated migrations and seed data",
+      "User signup through local Mailhog"
+    ]
+  },
+  "reset": {
+    "strategy": "Remove only owned PostgreSQL, MongoDB, Chroma, and signing-key state",
+    "effects": [
+      "postgres",
+      "mongo",
+      "chroma",
+      "signing-key"
+    ]
+  },
+  "default_credentials": [],
+  "resources": {
+    "memory_mb": 2048,
+    "cpus": 3,
+    "pids": 1024,
+    "read_only_root": false
+  },
+  "persistence": {
+    "required": true,
+    "volumes": [
+      "postgres",
+      "mongo",
+      "chroma",
+      "signing-key"
+    ]
+  },
+  "outbound_network": {
+    "required": true,
+    "reason": "Some advertised challenges call external services.",
+    "challenge_dependencies": [
+      "SSRF challenge calls www.google.com",
+      "Chatbot challenges need an LLM provider API key"
+    ]
+  },
+  "dangerous_capabilities": [],
+  "expected_functionality": [
+    "Signup and authentication",
+    "Vehicle and workshop APIs",
+    "Community content and API security challenges"
+  ],
+  "known_limitations": [
+    "Upstream deployment follows mutable main/latest tags",
+    "Chatbot and Chroma lack upstream resource limits"
+  ],
+  "last_verified": "2026-09-06",
+  "adapter_status": "quarantined",
+  "verification": {
+    "status": "blocked",
+    "platforms": [],
+    "evidence": []
+  },
+  "taxonomy": {
+    "owasp": [
+      "OWASP API Security Top 10"
+    ],
+    "cwe": [],
+    "cve": []
+  },
+  "references": [
+    "https://owasp.org/crAPI/docs/overview.html",
+    "https://github.com/OWASP/crAPI/blob/develop/docs/happy-path.md"
+  ]
+}
+

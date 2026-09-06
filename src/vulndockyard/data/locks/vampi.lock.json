@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "lab_id": "vampi",
+  "lab_version": "master",
+  "upstream_release": "latest",
+  "upstream_commit": "",
+  "images": [],
+  "template_sha256": "",
+  "source_sha256": "",
+  "build_recipe_revision": "",
+  "trust_evidence": [
+    "https://github.com/erev0s/VAmPI/blob/master/.github/workflows/docker-image.yml"
+  ],
+  "verified_at": "2026-09-06T00:00:00Z",
+  "verified_platforms": []
+}
+
