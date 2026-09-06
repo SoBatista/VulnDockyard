@@ -67,6 +67,38 @@ def test_target_projection_rejects_released_markers() -> None:
         _projection_state(version, readme, changelog)
 
 
+def _released_projection() -> tuple[str, str]:
+    readme = "https://img.shields.io/badge/version-1.2.3-blue\nVersion: `1.2.3`\n"
+    changelog = (
+        "## [Unreleased]\n\n"
+        "## [1.2.3] - 2026-09-06\n\n"
+        "### Fixed\n\n"
+        "- Closed one reviewed defect.\n\n"
+        "[Unreleased]: https://github.com/SoBatista/VulnDockyard/compare/v1.2.3...HEAD\n"
+        "[1.2.3]: https://github.com/SoBatista/VulnDockyard/releases/tag/v1.2.3\n"
+    )
+    return readme, changelog
+
+
+def test_released_projection_requires_exactly_one_categorized_section() -> None:
+    readme, changelog = _released_projection()
+
+    assert _projection_state("1.2.3", readme, changelog) == "released"
+
+    duplicate = changelog.replace(
+        "### Fixed", "## [1.2.3] - 2026-09-06\n\n### Added\n\n- Duplicate.\n\n### Fixed"
+    )
+    with pytest.raises(RuntimeError, match="consistently describe"):
+        _projection_state("1.2.3", readme, duplicate)
+
+    uncategorized = changelog.replace(
+        "### Fixed\n\n- Closed one reviewed defect.\n\n",
+        "Release text without categorized notes.\n\n",
+    )
+    with pytest.raises(RuntimeError, match="consistently describe"):
+        _projection_state("1.2.3", readme, uncategorized)
+
+
 def test_release_shaped_local_build_uses_reviewed_target_notes() -> None:
     notes = changelog_notes("1.0.0")
     assert notes.startswith("### Added\n")

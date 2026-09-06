@@ -31,10 +31,23 @@ def _projection_state(version: str, readme: str, changelog: str) -> str:
     released_declaration = f"Version: `{version}`"
     target_changelog_declaration = f"Target release: {version} (not yet released)."
     unreleased_target_link = "[Unreleased]: https://github.com/SoBatista/VulnDockyard/commits/main"
-    release_heading = re.search(
-        rf"^## \[{re.escape(version)}\] - (?P<date>\d{{4}}-\d{{2}}-\d{{2}})$",
-        changelog,
-        flags=re.MULTILINE,
+    release_headings = list(
+        re.finditer(
+            rf"^## \[{re.escape(version)}\] - (?P<date>\d{{4}}-\d{{2}}-\d{{2}})$",
+            changelog,
+            flags=re.MULTILINE,
+        )
+    )
+    release_heading = release_headings[0] if len(release_headings) == 1 else None
+    release_body = ""
+    if release_heading is not None:
+        start = release_heading.end()
+        next_heading = re.search(r"^## ", changelog[start:], flags=re.MULTILINE)
+        end = start + next_heading.start() if next_heading is not None else len(changelog)
+        release_body = changelog[start:end]
+    released_notes = (
+        re.search(r"^### \S", release_body, flags=re.MULTILINE) is not None
+        and re.search(r"^- \S", release_body, flags=re.MULTILINE) is not None
     )
     released_links = all(
         changelog.count(expected) == 1
@@ -61,6 +74,7 @@ def _projection_state(version: str, readme: str, changelog: str) -> str:
         and target_changelog_declaration not in changelog
         and unreleased_target_link not in changelog
         and release_heading is not None
+        and released_notes
         and released_links
     )
     if target_state:
