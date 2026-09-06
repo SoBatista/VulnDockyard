@@ -74,17 +74,35 @@ def check() -> str:
         "src/vulndockyard/_version.py"
     ):
         failures.append("package metadata does not project the authoritative source")
-    classifiers = project.get("project", {}).get("classifiers", [])
-    if "Development Status :: 5 - Production/Stable" not in classifiers:
-        failures.append("stable 1.0 package metadata must use the Production/Stable classifier")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     if changelog.count("## [Unreleased]") != 1:
         failures.append("changelog must contain exactly one Unreleased section")
+    projection_state = ""
     try:
-        _projection_state(version, readme, changelog)
+        projection_state = _projection_state(version, readme, changelog)
     except RuntimeError as exc:
         failures.append(str(exc))
+    classifiers = project.get("project", {}).get("classifiers", [])
+    expected_classifier = (
+        "Development Status :: 3 - Alpha"
+        if projection_state == "target"
+        else "Development Status :: 5 - Production/Stable"
+    )
+    if projection_state and expected_classifier not in classifiers:
+        failures.append(
+            f"{projection_state} package metadata must use the {expected_classifier!r} classifier"
+        )
+    contradictory_classifier = (
+        "Development Status :: 5 - Production/Stable"
+        if projection_state == "target"
+        else "Development Status :: 3 - Alpha"
+    )
+    if projection_state and contradictory_classifier in classifiers:
+        failures.append(
+            f"{projection_state} package metadata must not use the "
+            f"{contradictory_classifier!r} classifier"
+        )
     spec = importlib.util.spec_from_file_location(
         "vulndockyard_version", ROOT / "src" / "vulndockyard" / "_version.py"
     )
