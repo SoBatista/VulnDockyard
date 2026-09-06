@@ -327,12 +327,23 @@ class Docker:
     def exists(self, kind: str, object_id: str) -> bool:
         if kind not in {"container", "network", "volume"}:
             raise ValueError(f"unsupported Docker object kind: {kind}")
-        return (
-            self._run(
-                (kind, "inspect", object_id), timeout=self.timeouts.inspect, check=False
-            ).returncode
-            == 0
-        )
+        pattern = RESOURCE_NAME if kind == "volume" else OBJECT_ID
+        if pattern.fullmatch(object_id) is None:
+            raise IntegrityError(f"recorded Docker {kind} identity is malformed")
+        noun = "container" if kind == "container" else kind
+        query = [noun, "ls"]
+        if kind == "container":
+            query.append("--all")
+        if kind != "volume":
+            query.append("--no-trunc")
+        query.extend(("--quiet", "--filter", f"{'name' if kind == 'volume' else 'id'}={object_id}"))
+        response = self._run(tuple(query), timeout=self.timeouts.inspect)
+        identifiers = tuple(line for line in response.stdout.splitlines() if line)
+        if len(identifiers) != len(set(identifiers)) or any(
+            pattern.fullmatch(identifier) is None for identifier in identifiers
+        ):
+            raise IntegrityError(f"Docker returned malformed {kind} existence inventory")
+        return object_id in identifiers
 
     @staticmethod
     def _labels(kind: str, inspection: dict[str, Any]) -> dict[str, str]:
@@ -605,19 +616,20 @@ class Docker:
         ):
             raise PolicyError("Docker application has unsafe core runtime configuration")
         if (
-            any(host.get(key) not in ("", "private") for key in ("PidMode", "IpcMode"))
-            or host.get("UsernsMode") == "host"
+            host.get("PidMode") != ""
+            or host.get("IpcMode") != "private"
+            or host.get("UsernsMode") != ""
         ):
             raise PolicyError("Docker application uses a host namespace")
         if host.get("CapDrop") != ["ALL"] or host.get("CapAdd") not in (None, []):
             raise PolicyError("Docker application has unexpected Linux capabilities")
-        security_options = host.get("SecurityOpt")
-        if (
-            not isinstance(security_options, list)
-            or "no-new-privileges=true" not in security_options
-        ):
+        if host.get("SecurityOpt") != ["no-new-privileges=true"]:
             raise PolicyError("Docker application lacks no-new-privileges")
-        if host.get("Devices") not in (None, []) or host.get("DeviceRequests") not in (None, []):
+        if (
+            host.get("Devices") not in (None, [])
+            or host.get("DeviceRequests") not in (None, [])
+            or host.get("DeviceCgroupRules") not in (None, [])
+        ):
             raise PolicyError("Docker application has unexpected device access")
         expected_bytes = memory_mb * 1024 * 1024
         expected_nano_cpus = round(cpus * 1_000_000_000)
@@ -1045,18 +1057,18 @@ class Docker:
         ):
             raise PolicyError("Docker storage seeder has unsafe core runtime configuration")
         if (
-            any(host.get(key) not in ("", "private") for key in ("PidMode", "IpcMode"))
-            or host.get("UsernsMode") == "host"
+            host.get("PidMode") != ""
+            or host.get("IpcMode") != "private"
+            or host.get("UsernsMode") != ""
             or host.get("CapDrop") != ["ALL"]
             or host.get("CapAdd") not in (None, [])
         ):
             raise PolicyError("Docker storage seeder has unsafe namespaces or capabilities")
-        security_options = host.get("SecurityOpt")
         if (
-            not isinstance(security_options, list)
-            or "no-new-privileges=true" not in security_options
+            host.get("SecurityOpt") != ["no-new-privileges=true"]
             or host.get("Devices") not in (None, [])
             or host.get("DeviceRequests") not in (None, [])
+            or host.get("DeviceCgroupRules") not in (None, [])
         ):
             raise PolicyError("Docker storage seeder lacks required privilege containment")
         if (
@@ -1232,21 +1244,22 @@ class Docker:
         ):
             raise PolicyError("Docker gateway has unsafe core runtime configuration")
         if (
-            any(host.get(key) not in ("", "private") for key in ("PidMode", "IpcMode"))
-            or host.get("UsernsMode") == "host"
+            host.get("PidMode") != ""
+            or host.get("IpcMode") != "private"
+            or host.get("UsernsMode") != ""
         ):
             raise PolicyError("Docker gateway uses a host namespace")
         if canonical_capabilities(host.get("CapDrop")) != ("ALL",) or canonical_capabilities(
             host.get("CapAdd")
         ) != ("NET_BIND_SERVICE",):
             raise PolicyError("Docker gateway has unexpected Linux capabilities")
-        security_options = host.get("SecurityOpt")
-        if (
-            not isinstance(security_options, list)
-            or "no-new-privileges=true" not in security_options
-        ):
+        if host.get("SecurityOpt") != ["no-new-privileges=true"]:
             raise PolicyError("Docker gateway lacks no-new-privileges")
-        if host.get("Devices") not in (None, []) or host.get("DeviceRequests") not in (None, []):
+        if (
+            host.get("Devices") not in (None, [])
+            or host.get("DeviceRequests") not in (None, [])
+            or host.get("DeviceCgroupRules") not in (None, [])
+        ):
             raise PolicyError("Docker gateway has unexpected device access")
         if (
             host.get("Memory") != 128 * 1024 * 1024

@@ -47,6 +47,7 @@ class FakeDocker:
         self.seeder_exits = False
         self.application_exits = False
         self.engine_version = "28.0.0"
+        self.fail_exists_for: set[str] = set()
 
     def _id(self) -> str:
         self.create_count += 1
@@ -476,6 +477,8 @@ class FakeDocker:
         return self.objects[object_id]
 
     def exists(self, kind: str, object_id: str) -> bool:
+        if object_id in self.fail_exists_for:
+            raise PreflightError("injected Docker existence inventory failure")
         return object_id in self.objects
 
     def validate_owned(self, record: ResourceRecord, ownership: Ownership) -> dict[str, Any]:
@@ -536,6 +539,7 @@ class FakeDocker:
     def remove(self, record: ResourceRecord) -> None:
         self.removed.append(record.object_id)
         inspection = self.objects[record.object_id]
+        self.events.append(("remove", record.name))
         if record.kind == "container":
             binding = inspection.get("HostConfig", {}).get("PortBindings", {}).get("8080/tcp")
             if binding:
@@ -678,7 +682,9 @@ def test_persistent_rebuild_preserves_owned_data_and_reset_replaces_it(
     initial_transients = {
         record.object_id for record in initial.resources if record.kind != "volume"
     }
+    initial_containers = tuple(record for record in initial.resources if record.kind == "container")
     seeder_creations = sum(event[0] == "create-seeder" for event in docker.events)
+    rebuild_events_start = len(docker.events)
 
     rebuilt = value.rebuild(lab)
     after_rebuild = value.store.load(lab.manifest.id)
@@ -693,6 +699,11 @@ def test_persistent_rebuild_preserves_owned_data_and_reset_replaces_it(
     )
     assert initial_transients.isdisjoint(docker.objects)
     assert sum(event[0] == "create-seeder" for event in docker.events) == seeder_creations
+    rebuild_events = docker.events[rebuild_events_start:]
+    for record in initial_containers:
+        assert rebuild_events.index(("stop", record.name)) < rebuild_events.index(
+            ("remove", record.name)
+        )
 
     reset = value.reset(lab)
     after_reset = value.store.load(lab.manifest.id)
@@ -776,6 +787,11 @@ def test_failed_persistent_rebuild_retains_data_and_resumes_explicitly(
     assert interrupted is not None and interrupted.phase == "rebuild"
     assert all(
         docker.objects[record.object_id]["TestData"]["marker"] == "preserve" for record in volumes
+    )
+    assert all(
+        not docker.objects[record.object_id]["State"]["Running"]
+        for record in interrupted.resources
+        if record.kind == "container"
     )
     with pytest.raises(PolicyError, match="interrupted persistent rebuild"):
         value.status(lab)
@@ -2059,6 +2075,23 @@ def test_cleanup_prevalidates_every_resource_before_removing_anything(xdg_paths:
     assert tuple(docker.removed) == removed_before
     assert len(docker.objects) == 8
     assert value.store.load(lab.manifest.id) == state
+
+
+def test_cleanup_preserves_state_when_existence_inventory_fails(xdg_paths: Paths) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    state = value.store.load(lab.manifest.id)
+    assert state is not None
+    application = next(record for record in state.resources if record.name.endswith("-app"))
+    docker.fail_exists_for.add(application.object_id)
+    removed_before = tuple(docker.removed)
+
+    with pytest.raises(PreflightError, match="existence inventory failure"):
+        value.remove(lab)
+
+    assert tuple(docker.removed) == removed_before
+    assert value.store.load(lab.manifest.id) == state
+    assert application.object_id in docker.objects
 
 
 def test_runtime_inventory_never_infers_ownership_from_an_id_prefix(

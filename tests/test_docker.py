@@ -26,7 +26,7 @@ from vulndockyard.docker import (
 )
 from vulndockyard.errors import IntegrityError, PolicyError, PreflightError
 from vulndockyard.models import EphemeralMount
-from vulndockyard.process import Result, Runner
+from vulndockyard.process import CommandError, Result, Runner
 from vulndockyard.state import ResourceRecord
 
 
@@ -47,9 +47,10 @@ class RecordingRunner(Runner):
         call = tuple(argv)
         self.calls.append(call)
         self.environments.append(env)
-        if self.responses:
-            return self.responses.pop(0)
-        return Result(call, 0, "a" * 64 + "\n", "")
+        result = self.responses.pop(0) if self.responses else Result(call, 0, "a" * 64 + "\n", "")
+        if check and result.returncode != 0:
+            raise CommandError(result)
+        return result
 
 
 def test_timeout_environment_is_bounded_and_configurable() -> None:
@@ -482,9 +483,17 @@ def test_application_policy_rejects_effective_containment_drift() -> None:
     rejected("Config", "User", "0:0", "image or user")
     rejected("HostConfig", "NetworkMode", "host", "core runtime")
     rejected("HostConfig", "PidMode", "host", "host namespace")
+    rejected("HostConfig", "UsernsMode", "private", "host namespace")
     rejected("HostConfig", "CapDrop", [], "capabilities")
     rejected("HostConfig", "SecurityOpt", [], "no-new-privileges")
+    rejected(
+        "HostConfig",
+        "SecurityOpt",
+        ["no-new-privileges=true", "seccomp=unconfined"],
+        "no-new-privileges",
+    )
     rejected("HostConfig", "Devices", [{}], "device access")
+    rejected("HostConfig", "DeviceCgroupRules", ["c 1:3 rwm"], "device access")
     rejected("HostConfig", "Memory", 0, "resource limits")
     rejected("HostConfig", "Tmpfs", {"/unreviewed": "rw"}, "tmpfs mounts")
     rejected("HostConfig", "LogConfig", None, "log limits")
@@ -1008,6 +1017,54 @@ def test_seeder_policy_rejects_any_effective_network_attachment() -> None:
         )
 
 
+def test_seeder_policy_rejects_extra_security_options() -> None:
+    volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+    )
+    mount = EphemeralMount("data", "/juice-shop/data", 64)
+    inspection = seeder_inspection(ownership(), volume, mount)
+    host = inspection["HostConfig"]
+    assert isinstance(host, dict)
+    host["SecurityOpt"] = ["no-new-privileges=true", "apparmor=unconfined"]
+
+    with pytest.raises(PolicyError, match="privilege containment"):
+        Docker.validate_seeder_policy(
+            inspection,
+            image="registry.example.test/app@sha256:" + "1" * 64,
+            seeded_mounts=((volume, mount),),
+            uid=65532,
+            gid=65532,
+        )
+
+    inspection = seeder_inspection(ownership(), volume, mount)
+    host = inspection["HostConfig"]
+    assert isinstance(host, dict)
+    host["UsernsMode"] = "private"
+    with pytest.raises(PolicyError, match="namespaces or capabilities"):
+        Docker.validate_seeder_policy(
+            inspection,
+            image="registry.example.test/app@sha256:" + "1" * 64,
+            seeded_mounts=((volume, mount),),
+            uid=65532,
+            gid=65532,
+        )
+
+    inspection = seeder_inspection(ownership(), volume, mount)
+    host = inspection["HostConfig"]
+    assert isinstance(host, dict)
+    host["DeviceCgroupRules"] = ["c 1:3 rwm"]
+    with pytest.raises(PolicyError, match="privilege containment"):
+        Docker.validate_seeder_policy(
+            inspection,
+            image="registry.example.test/app@sha256:" + "1" * 64,
+            seeded_mounts=((volume, mount),),
+            uid=65532,
+            gid=65532,
+        )
+
+
 @pytest.mark.parametrize(
     ("running", "network_id", "endpoint_id"),
     (
@@ -1154,6 +1211,7 @@ def test_gateway_policy_rejects_effective_containment_drift() -> None:
     rejected("Config", "Cmd", ["sh"], "image, user, or command")
     rejected("HostConfig", "NetworkMode", "host", "core runtime")
     rejected("HostConfig", "IpcMode", "host", "host namespace")
+    rejected("HostConfig", "UsernsMode", "private", "host namespace")
     rejected("HostConfig", "CapAdd", ["SYS_ADMIN"], "capabilities")
     rejected(
         "HostConfig",
@@ -1162,7 +1220,14 @@ def test_gateway_policy_rejects_effective_containment_drift() -> None:
         "capabilities",
     )
     rejected("HostConfig", "SecurityOpt", [], "no-new-privileges")
+    rejected(
+        "HostConfig",
+        "SecurityOpt",
+        ["no-new-privileges=true", "apparmor=unconfined"],
+        "no-new-privileges",
+    )
     rejected("HostConfig", "DeviceRequests", [{}], "device access")
+    rejected("HostConfig", "DeviceCgroupRules", ["c 1:3 rwm"], "device access")
     rejected("HostConfig", "PidsLimit", 0, "resource limits")
     rejected("HostConfig", "Tmpfs", {}, "filesystem mounts")
     rejected("HostConfig", "LogConfig", None, "log limits")
@@ -1698,8 +1763,27 @@ def test_inspection_and_preflight_fail_closed(monkeypatch: pytest.MonkeyPatch) -
     runner.responses = [Result(("docker",), 0, "[]", "")]
     with pytest.raises(IntegrityError, match="unexpected"):
         docker.inspect("container", "d" * 64)
-    runner.responses = [Result(("docker",), 1, "", "missing")]
+    runner.responses = [Result(("docker",), 0, "", "")]
     assert not docker.exists("container", "d" * 64)
+    assert runner.calls[-1][3:] == (
+        "container",
+        "ls",
+        "--all",
+        "--no-trunc",
+        "--quiet",
+        "--filter",
+        "id=" + "d" * 64,
+    )
+    runner.responses = [
+        Result(("docker",), 1, "", "permission denied while connecting to Docker daemon")
+    ]
+    with pytest.raises(CommandError, match="permission denied"):
+        docker.exists("container", "d" * 64)
+    runner.responses = [Result(("docker",), 0, "other-volume\n", "")]
+    assert not docker.exists("volume", "target-volume")
+    runner.responses = [Result(("docker",), 0, "malformed/name\n", "")]
+    with pytest.raises(IntegrityError, match="existence inventory"):
+        docker.exists("volume", "target-volume")
     docker = Docker(runner, environment={"PATH": "/missing"})
     monkeypatch.setattr("vulndockyard.docker.shutil.which", lambda name, path=None: None)
     with pytest.raises(Exception, match="not installed"):

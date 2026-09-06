@@ -2030,7 +2030,15 @@ class Runtime:
         for kind in ("container", "network"):
             for record in reversed(tuple(item for item in state.resources if item.kind == kind)):
                 if self.docker.exists(record.kind, record.object_id):
-                    self.docker.validate_owned(record, ownership)
+                    inspection = self.docker.validate_owned(record, ownership)
+                    if record.kind == "container" and self._running(inspection):
+                        self.docker.stop(record)
+                        inspection = self.docker.validate_owned(record, ownership)
+                        if self._running(inspection):
+                            raise PreflightError(
+                                "persistent rebuild could not verify a graceful container stop"
+                            )
+                        self.store.save(state)
                     if record.kind == "network" and self.docker.configured_network_consumers(
                         record
                     ):
@@ -2104,8 +2112,32 @@ class Runtime:
                 )
             self.store.save(steady)
         except BaseException:
-            # The phase remains recoverable. A later explicit execution command
-            # adopts exact create/checkpoint-window resources before retrying.
+            # Keep a failed candidate stopped and recoverable. In particular, a
+            # health or identity failure must never leave the loopback gateway or
+            # vulnerable application running after rebuild reports failure.
+            try:
+                for record in reversed(
+                    tuple(item for item in state.resources if item.kind == "container")
+                ):
+                    if not self.docker.exists(record.kind, record.object_id):
+                        continue
+                    inspection = self.docker.validate_owned(record, ownership)
+                    if self._running(inspection):
+                        self.docker.stop(record)
+                        inspection = self.docker.validate_owned(record, ownership)
+                        if self._running(inspection):
+                            raise PreflightError(
+                                "persistent rebuild failure cleanup could not verify a stopped "
+                                "container"
+                            )
+                    self.store.save(state)
+            except Exception as cleanup_error:
+                raise PreflightError(
+                    "persistent rebuild failed and bounded transient cleanup could not be verified"
+                ) from cleanup_error
+            # The phase and every exact resource remain journaled. A later
+            # explicit execution command adopts any create/checkpoint-window
+            # resource before retrying; observational commands never recover it.
             raise
         return self._status(lab)
 
