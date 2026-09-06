@@ -207,6 +207,11 @@ def _phases() -> tuple[Phase, ...]:
         Phase("actionlint", (str(ROOT / ".tools" / "actionlint"), "-no-color"), 30),
         Phase("reproducible-release-build-and-sbom", (python, "scripts/release_artifacts.py"), 420),
         Phase("clean-release-install", (python, "scripts/verify_release_install.py"), 240),
+        Phase(
+            "fresh-clone-development-install",
+            (python, "scripts/verify_fresh_clone.py"),
+            300,
+        ),
         Phase("docker-preflight", (python, "scripts/docker_gate.py", "preflight"), 30),
         Phase(
             "runnable-adapter-smoke-and-reference-equivalence",

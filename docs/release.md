@@ -18,6 +18,12 @@ then install the local project or wheel with dependency resolution disabled. The
 lock is a checked projection of `uv.lock`; both versions and every accepted
 artifact SHA-256 must match.
 
+The bootstrap gate also clones the committed local repository into a private
+temporary directory with no hardlinks, follows the documented hash-locked
+development installation, and invokes both CLI entry points from that isolated
+checkout. This verifies fresh-clone instructions without contacting or mutating
+the GitHub repository.
+
 The release workflow is manual-only and must be dispatched from `main` after the
 maintainer explicitly approves publication. It accepts a CI run ID, verifies via
 the GitHub API that the run named `CI` succeeded for the identical `main` commit,
