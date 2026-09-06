@@ -825,9 +825,11 @@ class Docker:
             "--log-driver",
             "local",
             "--log-opt",
-            "max-size=1m",
+            "max-size=10m",
             "--log-opt",
-            "max-file=1",
+            "max-file=2",
+            "--log-opt",
+            "compress=true",
             "--user",
             f"{uid}:{gid}",
             "--read-only",
@@ -1003,9 +1005,9 @@ class Docker:
             or host.get("UsernsMode") == "host"
         ):
             raise PolicyError("Docker gateway uses a host namespace")
-        if canonical_capabilities(host.get("CapDrop")) != (
-            "ALL",
-        ) or canonical_capabilities(host.get("CapAdd")) != ("NET_BIND_SERVICE",):
+        if canonical_capabilities(host.get("CapDrop")) != ("ALL",) or canonical_capabilities(
+            host.get("CapAdd")
+        ) != ("NET_BIND_SERVICE",):
             raise PolicyError("Docker gateway has unexpected Linux capabilities")
         security_options = host.get("SecurityOpt")
         if (

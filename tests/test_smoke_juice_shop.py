@@ -107,18 +107,16 @@ def test_juice_shop_complete_behavioral_equivalence(xdg_paths: Paths) -> None:
         )
         assert app["HostConfig"]["PortBindings"] == {}
         assert app["HostConfig"]["RestartPolicy"]["Name"] == "no"
-        assert {
-            capability.removeprefix("CAP_")
-            for capability in app["HostConfig"]["CapDrop"]
-        } == {"ALL"}
+        assert {capability.removeprefix("CAP_") for capability in app["HostConfig"]["CapDrop"]} == {
+            "ALL"
+        }
         assert gateway["HostConfig"]["PortBindings"]["8080/tcp"] == [
             {"HostIp": "127.0.0.1", "HostPort": str(port)}
         ]
         assert gateway["HostConfig"]["RestartPolicy"]["Name"] == "no"
         assert gateway["Config"]["User"] == "1000:1000"
         assert {
-            capability.removeprefix("CAP_")
-            for capability in gateway["HostConfig"]["CapAdd"]
+            capability.removeprefix("CAP_") for capability in gateway["HostConfig"]["CapAdd"]
         } == {"NET_BIND_SERVICE"}
         network = next(record for record in state.resources if record.name.endswith("-net"))
         assert docker.inspect("network", network.object_id)["Internal"] is True

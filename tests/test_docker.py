@@ -511,6 +511,11 @@ def test_seeder_uses_locked_image_fixed_node_script_and_strict_containment() -> 
     assert "--read-only" in call
     assert call[call.index("--cap-drop") + 1] == "ALL"
     assert call[call.index("--security-opt") + 1] == "no-new-privileges=true"
+    assert [call[index + 1] for index, value in enumerate(call) if value == "--log-opt"] == [
+        "max-size=10m",
+        "max-file=2",
+        "compress=true",
+    ]
     assert "--privileged" not in call
 
 
