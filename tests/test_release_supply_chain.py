@@ -12,6 +12,7 @@ from scripts.check_version import check_release_ready
 from scripts.check_workflows import check as check_workflows
 from scripts.generate_sbom import generate
 from scripts.release import _expected_artifacts, _release_metadata, _verify_sums
+from scripts.release_artifacts import changelog_notes
 
 
 def test_dependency_lock_matches_uv_lock() -> None:
@@ -25,6 +26,12 @@ def test_every_canonical_version_projection_is_consistent() -> None:
 def test_unreleased_target_cannot_enter_publication_workflow() -> None:
     with pytest.raises(RuntimeError, match="unreleased target, not publication-ready"):
         check_release_ready()
+
+
+def test_release_shaped_local_build_uses_reviewed_target_notes() -> None:
+    notes = changelog_notes("1.0.0")
+    assert notes.startswith("### Added\n")
+    assert "not yet released" not in notes
 
 
 def test_workflow_supply_chain_policy() -> None:

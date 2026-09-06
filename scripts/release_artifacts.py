@@ -109,8 +109,15 @@ def changelog_notes(version: str) -> str:
         text,
         flags=re.MULTILINE | re.DOTALL,
     )
+    if match is None:
+        match = re.search(
+            rf"^## \[Unreleased\]\n\nTarget release: {re.escape(version)} "
+            r"\(not yet released\)\.\n(?P<body>.*?)(?=^## |\Z)",
+            text,
+            flags=re.MULTILINE | re.DOTALL,
+        )
     if match is None or not match.group("body").strip():
-        raise RuntimeError(f"changelog has no release notes for {version}")
+        raise RuntimeError(f"changelog has no release or target notes for {version}")
     return match.group("body").strip() + "\n"
 
 
