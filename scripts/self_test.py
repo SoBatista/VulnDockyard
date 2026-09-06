@@ -354,7 +354,7 @@ def main() -> int:
         labs, images = _inventory()
     except Exception as exc:
         reason = f"{type(exc).__name__}: {exc}"
-        report = _initialization_failure_report(
+        failure_report = _initialization_failure_report(
             started_at=started_at,
             phases=phases,
             reason=reason,
@@ -362,8 +362,8 @@ def main() -> int:
             commit=commit,
             tree=tree,
         )
-        ACTIVE_REPORT = report
-        _checkpoint(report)
+        ACTIVE_REPORT = failure_report
+        _checkpoint(failure_report)
         print(f"self-test initialization failed: {reason}", file=sys.stderr)
         print(f"Checkpoint: {ROOT / 'artifacts' / 'checkpoint.json'}")
         return 1
