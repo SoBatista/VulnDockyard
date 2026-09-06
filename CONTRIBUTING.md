@@ -29,7 +29,9 @@ with `sudo`. Use the reviewed standalone helper contract described by
 
 The complete self-test runs real digest-pinned Docker smoke tests and requires an
 available loopback port. Use focused unit commands while iterating; do not mark a
-release ready until the complete command passes without required skips.
+release ready until every locally applicable required phase passes. The checkpoint
+keeps remote-only release gates as explicit unverified skips until their documented
+bootstrap point.
 
 ## Changes and release impact
 

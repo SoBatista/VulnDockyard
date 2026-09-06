@@ -37,6 +37,10 @@ declares Internet egress requires `--acknowledge-egress`. An alternate applicati
 image requires both `--unsafe-development` and an immutable `--unsafe-image`; the
 run is visibly untrusted and cannot match the reviewed lock.
 
+After an interactive non-JSON `up`, the CLI offers to add the selected `.test`
+name when it is absent. Declining, interrupting, or failing this optional hosts
+step leaves the successfully started lab running and reports the manual command.
+
 Docker operations are always bounded. Advanced users may configure validated
 seconds with `VDY_TIMEOUT_PULL`, `VDY_TIMEOUT_START`, `VDY_TIMEOUT_HEALTH`,
 `VDY_TIMEOUT_STOP`, `VDY_TIMEOUT_CLEANUP`, and `VDY_TIMEOUT_INSPECT`. Each variable
