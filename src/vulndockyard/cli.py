@@ -308,8 +308,15 @@ def _doctor(paths: Paths, hosts_manager: HostsManager | None = None) -> dict[str
                 "detail": detail["compose_v2"],
             }
         )
-    except VulnDockyardError as exc:
-        checks.append({"name": "docker-engine", "ok": False, "required": True, "detail": str(exc)})
+    except (OSError, VulnDockyardError) as exc:
+        detail_text = (
+            str(exc)
+            if isinstance(exc, VulnDockyardError)
+            else f"Docker access failed ({type(exc).__name__})"
+        )
+        checks.append(
+            {"name": "docker-engine", "ok": False, "required": True, "detail": detail_text}
+        )
         checks.append(
             {
                 "name": "docker-engine-isolation",
@@ -507,7 +514,7 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
         effects = (
             lab.manifest.raw["reset"]["effects"]
             if command == "reset"
-            else ["managed containers", "managed network", "generated state"]
+            else ["owned containers", "owned networks", "owned volumes", "generated state"]
         )
         if command == "purge" and args.images:
             effects = [*effects, "known immutable image digests"]

@@ -165,7 +165,28 @@ def test_json_destructive_command_is_one_document(
     document = json.loads(capsys.readouterr().out)
     assert document["command"] == "reset"
     assert document["data"]["preview"]["lab_id"] == "juice-shop"
+    assert document["data"]["preview"]["effects"] == [
+        "owned containers and networks",
+        "all eight owned ephemeral data volumes",
+        "server-side accounts, progress, uploads, logs, and generated state",
+    ]
     assert document["data"]["status"]["lock_match"] is True
+
+
+@pytest.mark.parametrize("command", ["remove", "purge"])
+def test_runtime_removal_preview_names_every_owned_resource_kind(
+    command: str,
+    isolated_cli: type[FakeRuntime],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli.main(["--json", command, "juice-shop", "--yes"]) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["data"]["preview"]["effects"] == [
+        "owned containers",
+        "owned networks",
+        "owned volumes",
+        "generated state",
+    ]
 
 
 def test_stable_error_codes_and_json_errors(
@@ -376,6 +397,24 @@ def test_doctor_fails_when_engine_cannot_enforce_isolated_gateway_mode(
     assert "Linux Mint" in captured.err
     assert "upgrade manually" in captured.err
     assert "never installs or modifies Docker" in captured.err
+
+
+def test_doctor_reports_docker_permission_failure_without_disclosing_path(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class InaccessibleDocker:
+        def preflight(self) -> dict[str, object]:
+            raise PermissionError("/private/operator/docker.sock")
+
+    monkeypatch.setattr(cli, "Docker", InaccessibleDocker)
+    monkeypatch.setattr(cli, "port_available", lambda port: True)
+    assert cli.main(["doctor"]) == 5
+    captured = capsys.readouterr()
+    assert "FAIL docker-engine" in captured.err
+    assert "Docker access failed (PermissionError)" in captured.err
+    assert "/private/operator" not in captured.err
 
 
 def test_doctor_repairs_only_stale_managed_hosts(

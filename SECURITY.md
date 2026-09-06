@@ -2,7 +2,8 @@
 
 ## Supported versions
 
-Until a later release exists, only `1.0.x` receives controller security fixes.
+Version 1.0.0 is not yet released. After release, only `1.0.x` receives
+controller security fixes until a later supported release exists.
 Lab vulnerabilities are intentionally present and are not controller defects.
 
 ## Report privately

@@ -20,7 +20,7 @@ normal output excludes spoilers and flags. Stable exits are: 0 success, 2 usage,
 | `open LAB` / `logs LAB` | Open URL or show bounded application logs. |
 | `down LAB` / `stop LAB` | Idempotently stop, retain runtime and data. |
 | `restart LAB` | Stop/start the same locked deployment. |
-| `rebuild LAB` | Recreate only the same reviewed lock/reference; refuse stale or untrusted state. |
+| `rebuild LAB` | Recreate only the same reviewed lock/reference; preserve declared persistent data when that lifecycle is supported, and refuse stale or untrusted state. Current runnable adapters declare only disposable scratch data. |
 | `reset LAB --yes` | Preview, then return owned data to the declared clean state. |
 | `remove LAB --yes` | Remove owned runtime resources; retain images. |
 | `purge LAB --images --yes` | Remove owned state and optionally exact known digests. |

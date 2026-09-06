@@ -74,6 +74,9 @@ def check() -> str:
         "src/vulndockyard/_version.py"
     ):
         failures.append("package metadata does not project the authoritative source")
+    classifiers = project.get("project", {}).get("classifiers", [])
+    if "Development Status :: 5 - Production/Stable" not in classifiers:
+        failures.append("stable 1.0 package metadata must use the Production/Stable classifier")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     if changelog.count("## [Unreleased]") != 1:

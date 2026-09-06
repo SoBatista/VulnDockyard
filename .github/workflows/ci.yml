@@ -63,19 +63,52 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2
+      - name: Classify adapter smoke risk
+        id: smoke-scope
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            printf 'run_smoke=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ || ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'Could not validate commit range; fail closed to full smoke.\n'
+            printf 'run_smoke=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
+            .github/workflows/ci.yml pyproject.toml requirements-dev.lock uv.lock \
+            scripts src tests; then
+            printf 'Only reviewed low-risk paths changed; Docker smoke is not required.\n'
+            printf 'run_smoke=false\n' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" -ne 1 ]]; then
+              exit "$status"
+            fi
+            printf 'Runtime-relevant paths changed; running Docker smoke.\n'
+            printf 'run_smoke=true\n' >> "$GITHUB_OUTPUT"
+          fi
       - name: Set up Python 3.11
+        if: steps.smoke-scope.outputs.run_smoke == 'true'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
           cache: ""
       - name: Install exact development dependencies
+        if: steps.smoke-scope.outputs.run_smoke == 'true'
         run: |
           python -m pip install --disable-pip-version-check --require-hashes -r requirements-dev.lock
           python -m pip install --disable-pip-version-check --no-deps --no-build-isolation -e .
       - name: Run all reviewed adapter smoke tests
+        if: steps.smoke-scope.outputs.run_smoke == 'true'
         env:
           VDY_RUN_DOCKER_TESTS: "1"
         run: python -m pytest -m 'docker and smoke' --no-cov
       - name: Audit residual resources
-        if: always()
+        if: always() && steps.smoke-scope.outputs.run_smoke == 'true'
         run: scripts/docker-audit.sh

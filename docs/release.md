@@ -31,6 +31,15 @@ development installation, and invokes both CLI entry points from that isolated
 checkout. This verifies fresh-clone instructions without contacting or mutating
 the GitHub repository.
 
+The always-reported `runnable-adapter-smoke` job classifies each `main` push from
+the exact before/after commit range. Changes to controller source, tests, scripts,
+dependency locks, package metadata, or the smoke workflow run the complete
+runnable-lab matrix. A push limited to reviewed documentation and governance
+files reports success without installing dependencies or pulling images. A
+missing or malformed commit range fails closed to the full smoke. Manual dispatch
+always runs it. Expanding the low-risk set requires a reviewed risk-model change;
+new executable or catalogue paths are never implicitly exempted.
+
 The release workflow is manual-only and must be dispatched from `main` after the
 maintainer explicitly approves publication. It accepts a CI run ID, verifies via
 the GitHub API that the run named `CI` succeeded for the identical `main` commit,
@@ -70,3 +79,32 @@ environment only after its manifest records redistribution authority.
 Remote-only bootstrap gates are the first hosted CI/CodeQL/dependency-review run,
 repository ruleset behavior, private reporting/settings, GitHub artifact
 attestations, GHCR keyless signing, and post-publication download verification.
+
+## Standalone packaged installation
+
+After a release is published, download its wheel and `SHA256SUMS` from the same
+GitHub Release. Keep their original filenames in one empty directory, verify the
+wheel before installation, and use a dedicated virtual environment:
+
+```bash
+sha256sum --ignore-missing --check SHA256SUMS
+python3 -m venv vulndockyard-venv
+vulndockyard-venv/bin/python -m pip install ./vulndockyard-1.0.0-py3-none-any.whl
+vulndockyard-venv/bin/vulndockyard version
+vulndockyard-venv/bin/vdy doctor
+```
+
+The checksum file is useful only after its own origin has been authenticated.
+Compare it with the checksums shown by the HTTPS GitHub Release, and verify the
+GitHub artifact attestation with GitHub CLI when the release provides one:
+
+```bash
+gh attestation verify vulndockyard-1.0.0-py3-none-any.whl \
+  --repo SoBatista/VulnDockyard
+```
+
+The wheel pins its small runtime dependency set, but pip may download those exact
+dependencies from the configured package index. For an offline installation,
+pre-download wheels for the target Python/platform in a trusted environment and
+transfer them with their independently recorded hashes; do not disable checksum
+or attestation verification for the VulnDockyard wheel.

@@ -231,8 +231,11 @@ def check() -> None:
     if "allowlist" in gitleaks or "allowlists" in gitleaks:
         failures.append("Gitleaks global allowlists are prohibited")
     docs = (ROOT / "docs" / "commands.md").read_text(encoding="utf-8")
+    from vulndockyard.catalogue import Catalogue
     from vulndockyard.cli import build_parser
     from vulndockyard.privilege import HELPER_SHA256
+
+    Catalogue().validate()
 
     helper = ROOT / "src" / "vulndockyard" / "data" / "helpers" / "vulndockyard-hosts"
     if hashlib.sha256(helper.read_bytes()).hexdigest() != HELPER_SHA256:
@@ -257,16 +260,31 @@ def check() -> None:
         manifest = _load(manifest_path)
         lock = _load(lock_root / f"{manifest['id']}.lock.json")
         if manifest["adapter_status"] == "runnable":
+            smoke_path = f"tests/test_smoke_{str(manifest['id']).replace('-', '_')}.py"
+            if smoke_path not in relative_files:
+                failures.append(f"runnable adapter lacks a tracked smoke test: {manifest['id']}")
+            else:
+                smoke = (ROOT / smoke_path).read_text(encoding="utf-8")
+                for marker in ("pytest.mark.docker", "pytest.mark.smoke"):
+                    if marker not in smoke:
+                        failures.append(f"runnable adapter smoke lacks {marker}: {manifest['id']}")
             for image in lock["images"]:
                 if not re.fullmatch(r"sha256:[0-9a-f]{64}", image["digest"]):
                     failures.append(f"runnable image is not digest-pinned: {manifest['id']}")
             if manifest["trust"]["level"] == "vulndockyard-built":
-                license_review = str(manifest["license"]["redistribution"]).casefold()
-                if not lock["source_sha256"] or not lock["build_recipe_revision"]:
+                required = (
+                    "source_sha256",
+                    "build_recipe_revision",
+                    "sbom_url",
+                    "provenance_url",
+                    "signature_url",
+                    "redistribution_evidence_url",
+                )
+                if any(not lock[key] for key in required):
                     failures.append(
-                        f"project-built image lacks source/build lock: {manifest['id']}"
+                        f"project-built image lacks immutable build evidence: {manifest['id']}"
                     )
-                if not any(word in license_review for word in ("permit", "allow", "apache", "mit")):
+                if lock["redistribution_status"] != "permitted":
                     failures.append(
                         f"project-built image lacks redistribution authority: {manifest['id']}"
                     )
