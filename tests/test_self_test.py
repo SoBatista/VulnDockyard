@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from scripts import self_test
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -105,3 +107,27 @@ def test_remote_bootstrap_gates_do_not_make_publication_circular() -> None:
     }
     assert "GitHub release publication and artifact attestation" in post_release
     assert "manual published artifact and attestation verification" in post_release
+
+
+def test_smoke_checkpoint_loader_requires_a_terminal_machine_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(self_test, "ROOT", tmp_path)
+    artifact = tmp_path / "artifacts"
+    artifact.mkdir()
+    report = {
+        "schema_version": 1,
+        "result": "pass",
+        "pytest_exit_code": 0,
+        "expected_runnable_labs": ["juice-shop"],
+        "labs": [{"id": "juice-shop", "result": "pass"}],
+        "failures": [],
+    }
+    (artifact / "smoke-report.json").write_text(json.dumps(report) + "\n", encoding="utf-8")
+
+    assert self_test._load_smoke_report() == report
+
+    report["result"] = "running"
+    (artifact / "smoke-report.json").write_text(json.dumps(report) + "\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="terminal contract"):
+        self_test._load_smoke_report()

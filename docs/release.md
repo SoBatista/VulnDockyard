@@ -29,6 +29,12 @@ resolution disabled. The
 lock is a checked projection of `uv.lock`; both versions and every accepted
 artifact SHA-256 must match.
 
+The smoke gate discovers the runnable catalogue IDs, requires every collected
+Docker smoke test to declare exactly one matching `lab_id` marker, and fails when
+any runnable lab is missing, skipped, not run, or unsuccessful. Its deterministic
+`artifacts/smoke-report.json` receipt is embedded into the complete checkpoint;
+no required skip can be represented as a pass.
+
 The bootstrap gate also clones the committed local repository into a private
 temporary directory with no hardlinks, follows the documented hash-locked
 development installation, and invokes both CLI entry points from that isolated

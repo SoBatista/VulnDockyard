@@ -17,6 +17,7 @@ from vulndockyard.runtime import Runtime, port_available
 
 pytestmark = [
     pytest.mark.docker,
+    pytest.mark.lab_id("juice-shop"),
     pytest.mark.smoke,
     pytest.mark.skipif(
         os.environ.get("VDY_RUN_DOCKER_TESTS") != "1",

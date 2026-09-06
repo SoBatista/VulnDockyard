@@ -265,7 +265,11 @@ def check() -> None:
                 failures.append(f"runnable adapter lacks a tracked smoke test: {manifest['id']}")
             else:
                 smoke = (ROOT / smoke_path).read_text(encoding="utf-8")
-                for marker in ("pytest.mark.docker", "pytest.mark.smoke"):
+                for marker in (
+                    "pytest.mark.docker",
+                    f'pytest.mark.lab_id("{manifest["id"]}")',
+                    "pytest.mark.smoke",
+                ):
                     if marker not in smoke:
                         failures.append(f"runnable adapter smoke lacks {marker}: {manifest['id']}")
             for image in lock["images"]:

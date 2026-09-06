@@ -142,7 +142,7 @@ jobs:
         if: steps.smoke-scope.outputs.run_smoke == 'true'
         env:
           VDY_RUN_DOCKER_TESTS: "1"
-        run: python -m pytest -m 'docker and smoke' --no-cov
+        run: python scripts/run_smoke_gate.py
       - name: Audit residual resources
         if: always() && steps.smoke-scope.outputs.run_smoke == 'true'
         run: scripts/docker-audit.sh

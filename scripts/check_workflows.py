@@ -228,6 +228,7 @@ def check() -> None:
                 "git cat-file -e",
                 "0000000000000000000000000000000000000000",
                 "run_smoke=true",
+                "python scripts/run_smoke_gate.py",
             ):
                 if required not in smoke_text:
                     failures.append(

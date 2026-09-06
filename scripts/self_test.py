@@ -164,6 +164,26 @@ def _checkpoint(report: dict[str, Any]) -> None:
     os.replace(temporary, artifact_root / "checkpoint.json")
 
 
+def _load_smoke_report() -> dict[str, Any]:
+    path = ROOT / "artifacts" / "smoke-report.json"
+    if path.is_symlink():
+        raise RuntimeError("smoke report is an unsafe symlink")
+    raw = path.read_bytes()
+    if len(raw) > 1_000_000 or b"\0" in raw:
+        raise RuntimeError("smoke report is oversized or malformed")
+    value = json.loads(raw)
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != 1
+        or value.get("result") not in {"pass", "fail"}
+        or not isinstance(value.get("expected_runnable_labs"), list)
+        or not isinstance(value.get("labs"), list)
+        or not isinstance(value.get("failures"), list)
+    ):
+        raise RuntimeError("smoke report has an invalid terminal contract")
+    return value
+
+
 def _run_phase(phase: Phase) -> dict[str, object]:
     global ACTIVE_PHASE, ACTIVE_PHASE_STARTED, ACTIVE_PROCESS
 
@@ -267,7 +287,7 @@ def _phases() -> tuple[Phase, ...]:
         Phase("docker-preflight", (python, "scripts/docker_gate.py", "preflight"), 30),
         Phase(
             "runnable-adapter-smoke-and-reference-equivalence",
-            (python, "-m", "pytest", "-m", "docker and smoke", "--no-cov"),
+            (python, "scripts/run_smoke_gate.py"),
             900,
             {"VDY_RUN_DOCKER_TESTS": "1"},
         ),
@@ -336,6 +356,7 @@ def _initialization_failure_report(
         "gates": [_skipped_phase(phase, skip_reason) for phase in phases],
         "labs": [],
         "images": [],
+        "smoke": None,
         "residual_docker_resources": {"audit_error": [skip_reason]},
         "remote_bootstrap_gates": _remote_bootstrap_gates(),
     }
@@ -384,6 +405,7 @@ def main() -> int:
         "gates": [],
         "labs": labs,
         "images": images,
+        "smoke": None,
         "residual_docker_resources": None,
         "remote_bootstrap_gates": _remote_bootstrap_gates(),
     }
@@ -392,6 +414,19 @@ def main() -> int:
     failed = False
     for index, phase in enumerate(phases):
         result = _run_phase(phase)
+        if phase.name == "runnable-adapter-smoke-and-reference-equivalence":
+            try:
+                smoke = _load_smoke_report()
+                report["smoke"] = smoke
+                if result["result"] == "pass" and smoke["result"] != "pass":
+                    result["result"] = "fail"
+                    result["reason"] = "smoke accounting report did not pass"
+                    result["exit_code"] = 1
+            except (OSError, ValueError, RuntimeError) as exc:
+                report["smoke"] = {"result": "fail", "reason": str(exc)}
+                result["result"] = "fail"
+                result["reason"] = f"smoke accounting unavailable: {exc}"
+                result["exit_code"] = 1
         report["gates"].append(result)
         if result["result"] != "pass":
             failed = True

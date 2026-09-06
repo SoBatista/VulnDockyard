@@ -97,6 +97,7 @@ testpaths = ["tests"]
 pythonpath = [".", "src"]
 markers = [
   "docker: requires an accessible Docker daemon",
+  "lab_id(id): binds a smoke test to one stable catalogue lab ID",
   "smoke: pulls and runs reviewed lab images",
 ]
 
