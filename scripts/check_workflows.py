@@ -199,6 +199,7 @@ def check() -> None:
                 "scripts/check_release_metadata.py",
                 "scripts/check_dco.py",
                 "github.event.pull_request.base.sha",
+                "github.event.pull_request.head.sha",
             ):
                 if required not in metadata_text:
                     failures.append(

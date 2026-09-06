@@ -13,9 +13,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 SIGNOFF = re.compile(
-    r"^Signed-off-by:\s*(?P<name>[^<>\r\n]+?)\s*<(?P<email>[^<>\s]+)>\s*$",
-    flags=re.IGNORECASE | re.MULTILINE,
+    r"Signed-off-by:\s*(?P<name>[^<>\r\n]+?)\s*<(?P<email>[^<>\s]+)>",
+    flags=re.IGNORECASE,
 )
+TRAILER = re.compile(r"[A-Za-z0-9-]+:\s+\S.*")
 
 
 def _git() -> str:
@@ -64,10 +65,17 @@ def _commit_identity(commit: str) -> tuple[str, str, str]:
 def _has_author_signoff(name: str, email: str, message: str) -> bool:
     expected_name = " ".join(name.split())
     expected_email = email.casefold()
+    trailers: list[str] = []
+    for line in reversed(message.rstrip().splitlines()):
+        if TRAILER.fullmatch(line):
+            trailers.append(line)
+            continue
+        break
     return any(
         " ".join(match.group("name").split()) == expected_name
         and match.group("email").casefold() == expected_email
-        for match in SIGNOFF.finditer(message)
+        for line in trailers
+        if (match := SIGNOFF.fullmatch(line)) is not None
     )
 
 

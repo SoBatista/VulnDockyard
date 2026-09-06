@@ -11,6 +11,15 @@ from scripts import check_dco
         ("fix: example\n", False),
         ("Signed-off-by: Someone Else <ada@example.test>\n", False),
         ("Signed-off-by: Ada Lovelace <other@example.test>\n", False),
+        (
+            "fix: example\n\nSigned-off-by: Ada Lovelace <ada@example.test>\n\nMore body.\n",
+            False,
+        ),
+        (
+            "fix: example\n\nSigned-off-by: Ada Lovelace <ada@example.test>\n"
+            "Co-authored-by: Grace Hopper <grace@example.test>\n",
+            True,
+        ),
     ),
 )
 def test_author_signoff_requires_matching_name_and_email(message: str, expected: bool) -> None:
