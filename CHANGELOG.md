@@ -12,6 +12,9 @@ Target release: 1.0.0 (not yet released).
 ### Added
 
 - Provenance-aware Python controller with deterministic human and JSON output.
+- Distinct crash-recoverable rebuild, reset, and remove semantics, including
+  exact persistent-volume preservation, foreign-consumer rejection, and
+  fail-closed persistent-update handling.
 - Fail-closed versioned lab manifests, immutable locks, four image-trust levels,
   and twelve officially researched initial catalogue entries.
 - Digest-pinned OWASP Juice Shop reference adapter with loopback gateway,

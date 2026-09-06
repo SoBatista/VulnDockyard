@@ -62,9 +62,9 @@ firewall policy is an administrator action outside the controller's trust bounda
 Every resource records ownership, lab ID, manifest identity/version, run ID,
 creation time, trust state, and role. Names aid operators but confer no ownership.
 Any mismatch stops cleanup. State is checkpointed after each creation so an
-interrupted start can recover exact object IDs. Run-state schema v3 also snapshots
+interrupted start can recover exact object IDs. Run-state schema v4 also snapshots
 the complete effective resource, egress, writable-storage, and bounded
-health/identity contract. This lets an update revalidate and smoke its preserved
+health/identity contract, including whether declared storage is persistent. This lets an update revalidate and smoke its preserved
 rollback deployment even after the installed manifest advances; a legacy state
 without that snapshot is not a transactional rollback base.
 
@@ -72,15 +72,20 @@ Application, gateway, and seeder containers use Docker's bounded local logging
 driver (two compressed 10 MiB files) and set the swap-inclusive memory ceiling
 equal to the memory limit, preventing a lab from gaining an unbounded host-log
 or swap budget.
-The application root is read-only. Each reviewed writable path is either a
-bounded direct tmpfs or an owned `noexec,nosuid,nodev` local-driver tmpfs
-volume. Seeded volumes are populated by a short-lived, network-disabled,
+The application root is read-only. For a disposable adapter, each reviewed
+writable path is either a bounded direct tmpfs or an owned
+`noexec,nosuid,nodev` local-driver tmpfs volume. For an adapter that explicitly
+requires persistence, every writable path is an ordinary, exactly owned local
+volume mounted with `volume-nocopy`; mixed persistent/disposable storage is not
+accepted by manifest v1. Seeded volumes are populated once by a short-lived, network-disabled,
 same-image helper running a fixed controller-owned Node script; its inspected
 effective policy, exact null-network attachment, liveness, and readiness marker
 are required, and no seeder remains in the steady state. The application must be
 observed running before the seeder is removed. The controller re-seeds volatile
-data after a stop, while reset/remove delete only the selected run's exactly owned
-storage. If interruption occurs in the narrow create/checkpoint window,
+data after a stop but never re-seeds preserved data. A persistent rebuild keeps
+the same ownership epoch and exact volume IDs while atomically journaling all
+transient replacement resources. Reset/remove delete only the selected run's
+exactly owned storage. If interruption occurs in the narrow create/checkpoint window,
 observational commands report the orphan; explicit start or cleanup adopts it
 only by deterministic name and complete ownership identity before validation or
 removal.
@@ -111,6 +116,12 @@ recovery path that never creates or starts a container, including on an older
 Engine.
 Observational commands refuse a pending journal; only an explicit execution
 lifecycle command may recreate, reseed, or start a rollback deployment.
+
+The blue/green update backend rejects a change when either side requires
+persistence, before pulling an image or mutating runtime state. A future
+persistent update requires an adapter-specific reviewed migration and rollback
+contract; sharing writable data between old and candidate deployments is not
+assumed safe.
 
 The controller itself remains unprivileged. Optional friendly-hostname changes
 are delegated to a small isolated standard-library helper installed at a fixed

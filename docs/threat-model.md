@@ -54,6 +54,11 @@ blocked and require a future dedicated disposable-VM backend. A gateway could be
 attacked by malformed application responses. Docker caches vulnerable layers.
 Loopback services remain reachable by other local users/processes. Browser state
 can outlive server reset. Users must not add real credentials to labs.
+Ordinary Docker local volumes have no portable per-volume disk quota; a reviewed
+persistent adapter therefore retains a host-disk exhaustion residual risk even
+though CPU, memory, process, and log limits remain enforced. Persistent volumes
+are allowed only as an all-mount v1 policy, with root ownership, exact labels,
+`volume-nocopy`, foreign-consumer rejection, and no automatic update migration.
 
 The local Docker daemon and its administrator are trusted. In particular, the
 daemon must retain Docker 28's default port-filtering behavior; an administrator

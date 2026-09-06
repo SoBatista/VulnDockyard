@@ -23,12 +23,24 @@ or overlap, and sizes are bounded to 1–4096 MiB per mount and 8192 MiB in tota
 At most 32 mounts may appear in either group. Quarantined adapters retain an
 explicit empty contract until their writable paths and ownership are reviewed.
 
-Scratch volume names are also listed in `persistence.volumes` so ownership and
-cleanup can be audited. `persistence.required: false` means these volumes contain
-no retained user data: the current backend may discard them during rebuild, and
-reset and remove always discard them. It does not turn an ephemeral scratch
-volume into persistent application data. Runnable adapters requiring retained
-data are rejected until a reviewed persistent-volume lifecycle is implemented.
+Every writable-storage name is also listed exactly once in
+`persistence.volumes`, so lifecycle ownership and cleanup remain auditable.
+`persistence.required: false` declares the complete set as disposable scratch:
+the backend may discard it during rebuild, and reset and remove always discard
+it. `persistence.required: true` declares the complete set as retained
+application data: rebuild must preserve it, while reset must discard and
+reinitialize only those exactly owned declared volumes. Mixed persistent and
+disposable writable paths are not part of manifest v1.
+
+The current persistent-volume contract is deliberately narrow. A runnable
+persistent adapter must declare at least one writable mount, its
+`persistence.volumes` set must exactly equal the names across
+`ephemeral_storage.seeded` and `ephemeral_storage.empty`, and storage UID/GID must
+both be zero. These constraints let the Docker backend fail closed rather than
+silently creating ordinary named volumes that a declared non-root identity
+cannot initialize. Quarantined adapters may retain incomplete persistence
+metadata while their runtime layout is researched; runnable-only constraints do
+not make that catalogue metadata executable.
 
 Trust levels are `upstream-signed`, `upstream-pinned`, `vulndockyard-built`, and
 `quarantined`. Digest pinning is mandatory for runnable images but proves only

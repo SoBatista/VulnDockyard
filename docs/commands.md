@@ -20,8 +20,8 @@ normal output excludes spoilers and flags. Stable exits are: 0 success, 2 usage,
 | `open LAB` / `logs LAB` | Open URL or show bounded application logs. |
 | `down LAB` / `stop LAB` | Idempotently stop, retain runtime and data. |
 | `restart LAB` | Stop/start the same locked deployment. |
-| `rebuild LAB` | Recreate only the same reviewed lock/reference; preserve declared persistent data when that lifecycle is supported, and refuse stale or untrusted state. Current runnable adapters declare only disposable scratch data. |
-| `reset LAB --yes` | Preview, then return owned data to the declared clean state. |
+| `rebuild LAB` | Recreate only the same reviewed lock/reference; preserve every exactly owned declared persistent volume, and refuse stale, untrusted, missing, relabeled, or foreign-consumed state. |
+| `reset LAB --yes` | Preview exact declared volume names, delete only owned data, then create the declared clean state. |
 | `remove LAB --yes` | Remove owned runtime resources; retain images. |
 | `purge LAB --images --yes` | Remove owned state and optionally exact known digests. |
 | `update --check [LAB]` | Read-only stable release discovery. |
@@ -30,6 +30,12 @@ normal output excludes spoilers and flags. Stable exits are: 0 success, 2 usage,
 | `hosts helper` | Show the packaged helper path, release checksum, fixed target, owner, and mode. |
 | `provider sync/status vulhub` | Verify/cache or report pinned official metadata. |
 | `completion SHELL` | Bash, Zsh, or Fish completion source. |
+
+Manifest v1 supports a binary writable-storage lifecycle: all declared mounts are
+either disposable or persistent. No packaged runnable adapter currently requires
+persistence, but the controller lifecycle is implemented and policy-tested.
+Persistent updates remain blocked until an adapter supplies a reviewed data
+migration and rollback contract.
 
 `--port PORT` is an explicit fallback and stays loopback-only. `--allow-multiple`
 acknowledges additional resource use and wider local attack surface. A lab that
