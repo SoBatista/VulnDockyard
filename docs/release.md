@@ -18,10 +18,12 @@ remote-only gates remain explicitly recorded as unverified skips until their
 documented bootstrap point. The suite compares two builds, installs from a
 tracked-files-only release shape into a clean venv,
 generates an SPDX package SBOM with explicit `DEPENDS_ON` relationships for exact
-runtime requirements, runs the real digest-pinned adapter smoke, and audits
-residual Docker resources. Build, CI, and verification environments install the
-complete dependency closure from `requirements-dev.lock` with pip hash checking,
-then install the local project or wheel with dependency resolution disabled. The
+runtime requirements, scans both the tracked release tree and all reachable Git
+history with the checksum-pinned Gitleaks binary, runs the real digest-pinned
+adapter smoke, and audits residual Docker resources. Build, CI, and verification
+environments install the complete dependency closure from `requirements-dev.lock`
+with pip hash checking, then install the local project or wheel with dependency
+resolution disabled. The
 lock is a checked projection of `uv.lock`; both versions and every accepted
 artifact SHA-256 must match.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scan exactly the tracked release tree with the pinned Gitleaks binary."""
+"""Scan the tracked release tree and reachable Git history with pinned Gitleaks."""
 
 from __future__ import annotations
 
@@ -43,6 +43,23 @@ def scan() -> None:
             check=True,
             timeout=60,
         )
+    subprocess.run(  # noqa: S603 - checksum-pinned scanner and fixed arguments
+        (
+            str(binary),
+            "git",
+            "--no-banner",
+            "--no-color",
+            "--redact=100",
+            "--config",
+            str(ROOT / ".gitleaks.toml"),
+            "--timeout=45",
+            "--log-opts=--all",
+            str(ROOT),
+        ),
+        cwd=ROOT,
+        check=True,
+        timeout=60,
+    )
 
 
 def main() -> int:
@@ -52,7 +69,7 @@ def main() -> int:
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"secret scan failed: {exc}", file=sys.stderr)
         return 1
-    print("tracked release tree secret scan passed")
+    print("tracked release tree and reachable Git history secret scan passed")
     return 0
 
 

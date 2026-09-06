@@ -195,6 +195,21 @@ def check() -> None:
                 failures.append("release.yml: development events must never publish")
         text = path.read_text(encoding="utf-8")
         if path.name == "ci.yml":
+            quality = jobs.get("quality", {})
+            quality_steps = quality.get("steps", []) if isinstance(quality, dict) else []
+            quality_checkouts = [
+                step
+                for step in quality_steps
+                if isinstance(step, dict)
+                and str(step.get("uses", "")).startswith("actions/checkout@")
+            ]
+            if (
+                len(quality_checkouts) != 1
+                or quality_checkouts[0].get("with", {}).get("fetch-depth") != 0
+            ):
+                failures.append(
+                    "ci.yml: quality checkout must fetch complete history for secret scanning"
+                )
             smoke = jobs.get("docker-smoke", {})
             smoke_text = str(smoke)
             for required in (

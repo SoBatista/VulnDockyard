@@ -253,7 +253,7 @@ def _phases() -> tuple[Phase, ...]:
         ),
         Phase("repository-doc-lock-policy", (python, "scripts/check_repository.py"), 60),
         Phase("gitleaks-bootstrap", (python, "scripts/install_gitleaks.py"), 60),
-        Phase("tracked-release-secret-scan", (python, "scripts/secret_scan.py"), 60),
+        Phase("tracked-tree-and-history-secret-scan", (python, "scripts/secret_scan.py"), 120),
         Phase("workflow-policy", (python, "scripts/check_workflows.py"), 30),
         Phase("actionlint-bootstrap", (python, "scripts/install_actionlint.py"), 60),
         Phase("actionlint", (str(ROOT / ".tools" / "actionlint"), "-no-color"), 30),

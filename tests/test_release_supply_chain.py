@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from scripts import release as release_module
+from scripts import secret_scan
 from scripts.check_repository import _dependency_lock_failures
 from scripts.check_version import check as check_version
 from scripts.check_version import check_release_ready
@@ -38,6 +39,32 @@ def test_release_shaped_local_build_uses_reviewed_target_notes() -> None:
 
 def test_workflow_supply_chain_policy() -> None:
     check_workflows()
+
+
+def test_secret_scan_covers_tracked_tree_and_reachable_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("safe\n", encoding="utf-8")
+    binary = tmp_path / "gitleaks"
+    binary.write_text("fixture\n", encoding="utf-8")
+    calls: list[tuple[str, ...]] = []
+
+    def record(arguments: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(arguments)
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+
+    monkeypatch.setattr(secret_scan, "ROOT", tmp_path)
+    monkeypatch.setattr(secret_scan, "install", lambda: binary)
+    monkeypatch.setattr(secret_scan, "tracked_files", lambda: (tracked,))
+    monkeypatch.setattr(subprocess, "run", record)
+
+    secret_scan.scan()
+
+    assert [call[1] for call in calls] == ["dir", "git"]
+    assert "--log-opts=--all" in calls[1]
+    assert calls[1][-1] == str(tmp_path)
 
 
 def test_sbom_contains_exact_runtime_dependency_relationship(tmp_path: Path) -> None:
