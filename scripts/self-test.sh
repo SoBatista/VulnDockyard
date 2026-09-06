@@ -6,6 +6,10 @@ if ! [[ "${overall_timeout}" =~ ^[1-9][0-9]*$ ]]; then
   printf 'VDY_SELF_TEST_TIMEOUT_SECONDS must be a positive integer.\n' >&2
   exit 2
 fi
+if (( overall_timeout > 3600 )); then
+  printf 'VDY_SELF_TEST_TIMEOUT_SECONDS must not exceed 3600 seconds.\n' >&2
+  exit 2
+fi
 
 python_command="${VDY_PYTHON:-}"
 if [[ -z "${python_command}" ]]; then

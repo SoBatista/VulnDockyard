@@ -225,6 +225,11 @@ def check() -> None:
     }
     if configured != TRUSTED_PRECOMMIT:
         failures.append("pre-commit repositories must match the reviewed full-SHA allowlist")
+    gitleaks = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+    if gitleaks.get("extend") != {"useDefault": True}:
+        failures.append("Gitleaks must extend its pinned binary's complete default ruleset")
+    if "allowlist" in gitleaks or "allowlists" in gitleaks:
+        failures.append("Gitleaks global allowlists are prohibited")
     docs = (ROOT / "docs" / "commands.md").read_text(encoding="utf-8")
     from vulndockyard.cli import build_parser
     from vulndockyard.privilege import HELPER_SHA256

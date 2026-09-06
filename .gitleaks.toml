@@ -2,10 +2,3 @@ title = "VulnDockyard secret scanning"
 
 [extend]
 useDefault = true
-
-[allowlist]
-description = "Only explicit test fixtures and documented lab defaults are eligible."
-paths = [
-  '''tests/.*''',
-  '''src/vulndockyard/data/manifests/.*\.json''',
-]

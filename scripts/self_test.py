@@ -23,7 +23,10 @@ from scripts.check_version import authoritative_version  # noqa: E402
 
 ACTIVE_PROCESS: subprocess.Popen[str] | None = None
 ACTIVE_PHASE = "initialization"
+ACTIVE_PHASE_STARTED: float | None = None
+ACTIVE_PHASES: tuple[Phase, ...] = ()
 ACTIVE_REPORT: dict[str, Any] | None = None
+SELF_TEST_STARTED: float | None = None
 
 
 def _terminate_active() -> None:
@@ -40,18 +43,42 @@ def _terminate_active() -> None:
 def _overall_timeout(signum: int, frame: object) -> None:
     del signum, frame
     _terminate_active()
+    reason = f"overall watchdog interrupted phase {ACTIVE_PHASE}"
     if ACTIVE_REPORT is not None:
+        existing = {str(gate.get("name")) for gate in ACTIVE_REPORT["gates"]}
+        active = next((phase for phase in ACTIVE_PHASES if phase.name == ACTIVE_PHASE), None)
+        if active is not None and active.name not in existing:
+            duration = 0.0
+            if ACTIVE_PHASE_STARTED is not None:
+                duration = round(time.monotonic() - ACTIVE_PHASE_STARTED, 3)
+            ACTIVE_REPORT["gates"].append(
+                {
+                    "name": active.name,
+                    "command": list(active.command),
+                    "timeout_seconds": active.timeout,
+                    "duration_seconds": duration,
+                    "result": "fail",
+                    "reason": reason,
+                    "exit_code": 124,
+                    "diagnostic_tail": reason,
+                }
+            )
+        _append_unrun_phases(ACTIVE_REPORT, ACTIVE_PHASES, reason)
         ACTIVE_REPORT["result"] = "fail"
         ACTIVE_REPORT["finished_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-        ACTIVE_REPORT["gates"].append(
-            {
-                "name": "overall-watchdog",
-                "result": "fail",
-                "reason": f"overall watchdog interrupted phase {ACTIVE_PHASE}",
+        if SELF_TEST_STARTED is not None:
+            ACTIVE_REPORT["duration_seconds"] = round(time.monotonic() - SELF_TEST_STARTED, 3)
+        ACTIVE_REPORT["watchdog"] = {
+            "result": "fail",
+            "phase": ACTIVE_PHASE,
+            "reason": reason,
+        }
+        if ACTIVE_REPORT["residual_docker_resources"] is None:
+            ACTIVE_REPORT["residual_docker_resources"] = {
+                "audit_error": ["not run because the overall watchdog expired"]
             }
-        )
         _checkpoint(ACTIVE_REPORT)
-    print(f"overall watchdog interrupted phase {ACTIVE_PHASE}", file=sys.stderr)
+    print(reason, file=sys.stderr)
     raise SystemExit(124)
 
 
@@ -61,6 +88,26 @@ class Phase:
     command: tuple[str, ...]
     timeout: int
     environment: dict[str, str] = dataclasses.field(default_factory=dict)
+
+
+def _skipped_phase(phase: Phase, reason: str) -> dict[str, object]:
+    return {
+        "name": phase.name,
+        "command": list(phase.command),
+        "timeout_seconds": phase.timeout,
+        "duration_seconds": 0.0,
+        "result": "skip",
+        "reason": reason,
+        "exit_code": None,
+        "diagnostic_tail": "",
+    }
+
+
+def _append_unrun_phases(report: dict[str, Any], phases: tuple[Phase, ...], reason: str) -> None:
+    recorded = {str(gate.get("name")) for gate in report["gates"]}
+    for phase in phases:
+        if phase.name not in recorded:
+            report["gates"].append(_skipped_phase(phase, reason))
 
 
 def _git(*arguments: str) -> str:
@@ -118,10 +165,11 @@ def _checkpoint(report: dict[str, Any]) -> None:
 
 
 def _run_phase(phase: Phase) -> dict[str, object]:
-    global ACTIVE_PHASE, ACTIVE_PROCESS
+    global ACTIVE_PHASE, ACTIVE_PHASE_STARTED, ACTIVE_PROCESS
 
     ACTIVE_PHASE = phase.name
     started = time.monotonic()
+    ACTIVE_PHASE_STARTED = started
     environment = os.environ.copy()
     environment.update(phase.environment)
     try:
@@ -135,6 +183,7 @@ def _run_phase(phase: Phase) -> dict[str, object]:
             start_new_session=True,
         )
     except OSError as exc:
+        ACTIVE_PHASE_STARTED = None
         duration = round(time.monotonic() - started, 3)
         reason = f"could not start gate command: {type(exc).__name__}: {exc}"
         print(f"[FAIL] {phase.name} ({duration:.3f}s)\n{reason}")
@@ -165,6 +214,7 @@ def _run_phase(phase: Phase) -> dict[str, object]:
         raise
     finally:
         ACTIVE_PROCESS = None
+        ACTIVE_PHASE_STARTED = None
     duration = round(time.monotonic() - started, 3)
     passed = process.returncode == 0 and not timed_out
     reason = ""
@@ -201,7 +251,9 @@ def _phases() -> tuple[Phase, ...]:
             (python, "-m", "pytest", "-m", "not docker and not smoke"),
             240,
         ),
-        Phase("repository-secret-doc-lock-policy", (python, "scripts/check_repository.py"), 60),
+        Phase("repository-doc-lock-policy", (python, "scripts/check_repository.py"), 60),
+        Phase("gitleaks-bootstrap", (python, "scripts/install_gitleaks.py"), 60),
+        Phase("tracked-release-secret-scan", (python, "scripts/secret_scan.py"), 60),
         Phase("workflow-policy", (python, "scripts/check_workflows.py"), 30),
         Phase("actionlint-bootstrap", (python, "scripts/install_actionlint.py"), 60),
         Phase("actionlint", (str(ROOT / ".tools" / "actionlint"), "-no-color"), 30),
@@ -226,11 +278,12 @@ def _phases() -> tuple[Phase, ...]:
 
 
 def main() -> int:
-    global ACTIVE_REPORT
+    global ACTIVE_PHASES, ACTIVE_REPORT, SELF_TEST_STARTED
 
     os.chdir(ROOT)
     signal.signal(signal.SIGTERM, _overall_timeout)
     started_at = datetime.now(UTC)
+    SELF_TEST_STARTED = time.monotonic()
     try:
         version = authoritative_version()
         commit = _git("rev-parse", "HEAD")
@@ -256,7 +309,9 @@ def main() -> int:
                 "gate": "hosted CI and security workflows",
                 "result": "skip",
                 "required_before_release": True,
-                "reason": "cannot validate this candidate commit until it is pushed",
+                "reason": (
+                    "not verified by this local command; inspect hosted CI for the exact commit"
+                ),
             },
             {
                 "gate": "repository ruleset and private vulnerability reporting",
@@ -281,13 +336,21 @@ def main() -> int:
     ACTIVE_REPORT = report
     _checkpoint(report)
     failed = False
-    for phase in _phases():
+    phases = _phases()
+    ACTIVE_PHASES = phases
+    for index, phase in enumerate(phases):
         result = _run_phase(phase)
         report["gates"].append(result)
-        _checkpoint(report)
         if result["result"] != "pass":
             failed = True
+            _append_unrun_phases(
+                report,
+                phases[index + 1 :],
+                f"not run because required gate {phase.name} failed",
+            )
+            _checkpoint(report)
             break
+        _checkpoint(report)
     try:
         report["residual_docker_resources"] = _residual()
     except Exception as exc:
