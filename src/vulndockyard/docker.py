@@ -672,7 +672,15 @@ class Docker:
                     "Docker application named volume is not configured exactly writable"
                 )
             volume_options = mount.get("VolumeOptions")
-            if volume_options != {"NoCopy": True}:
+            allowed_volume_options = {"NoCopy", "Labels", "Subpath", "DriverConfig"}
+            if (
+                not isinstance(volume_options, dict)
+                or not set(volume_options).issubset(allowed_volume_options)
+                or volume_options.get("NoCopy") is not True
+                or volume_options.get("Labels") not in (None, {})
+                or volume_options.get("Subpath") not in (None, "")
+                or volume_options.get("DriverConfig") not in (None, {})
+            ):
                 raise PolicyError("Docker application named volume lacks exact volume-nocopy")
             actual_configured_volumes.add((source, target, True))
         if (

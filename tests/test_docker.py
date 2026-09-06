@@ -527,7 +527,12 @@ def test_application_policy_rejects_effective_containment_drift() -> None:
 
 @pytest.mark.parametrize(
     "volume_options",
-    ({}, {"NoCopy": False}, {"NoCopy": True, "Subpath": "nested"}),
+    (
+        {},
+        {"NoCopy": False},
+        {"NoCopy": True, "Subpath": "nested"},
+        {"NoCopy": True, "DriverConfig": {"Name": "local"}},
+    ),
 )
 def test_application_policy_requires_exact_volume_nocopy(
     volume_options: dict[str, object],
@@ -642,6 +647,63 @@ def test_application_policy_canonicalizes_omitted_readonly_to_writable() -> None
                 "Source": volume.name,
                 "Target": mount.container_path,
                 "VolumeOptions": {"NoCopy": True},
+            }
+        ],
+    )
+
+    Docker.validate_application_policy(
+        inspection,
+        image="registry.example.test/app@sha256:" + "1" * 64,
+        network="vdy-network",
+        memory_mb=512,
+        cpus=0.5,
+        pids=256,
+        seeded_mounts=((volume, mount),),
+        empty_mounts=(),
+        storage_uid=65532,
+        storage_gid=65532,
+    )
+
+
+@pytest.mark.parametrize(
+    "volume_options",
+    (
+        {"NoCopy": True},
+        {
+            "NoCopy": True,
+            "Labels": None,
+            "Subpath": "",
+            "DriverConfig": {},
+        },
+        {"NoCopy": True, "DriverConfig": None},
+        {"NoCopy": True, "Labels": {}},
+    ),
+)
+def test_application_policy_canonicalizes_empty_volume_option_defaults(
+    volume_options: dict[str, object],
+) -> None:
+    volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+    )
+    mount = EphemeralMount("data", "/juice-shop/data", 64)
+    inspection = application_inspection(
+        ownership(),
+        mounts=[
+            {
+                "Type": "volume",
+                "Name": volume.name,
+                "Destination": mount.container_path,
+                "RW": True,
+            }
+        ],
+        configured_mounts=[
+            {
+                "Type": "volume",
+                "Source": volume.name,
+                "Target": mount.container_path,
+                "VolumeOptions": volume_options,
             }
         ],
     )
