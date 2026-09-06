@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from vulndockyard.errors import IntegrityError, PreflightError
+from vulndockyard.models import EphemeralStorage, Service
 from vulndockyard.paths import Paths, assert_owned_path, remove_owned_tree
-from vulndockyard.state import ResourceRecord, RunState, StateStore, UpdateJournal
+from vulndockyard.state import (
+    ResourceRecord,
+    RunState,
+    RuntimePolicySnapshot,
+    StateStore,
+    UpdateJournal,
+)
 
 
 def test_xdg_discovery_and_permissions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -61,6 +70,24 @@ def state() -> RunState:
     )
 
 
+def policy() -> RuntimePolicySnapshot:
+    return RuntimePolicySnapshot(
+        512,
+        0.5,
+        256,
+        True,
+        False,
+        EphemeralStorage(65532, 65532, (), ()),
+        "juice-shop.test",
+        120,
+        (Service("web", "application", 3000, "http", "/", "OWASP Juice Shop"),),
+    )
+
+
+def serialized_state() -> dict[str, Any]:
+    return cast(dict[str, Any], json.loads(json.dumps(state().serializable())))
+
+
 def test_state_round_trip_is_atomic_and_idempotent(xdg_paths: Paths) -> None:
     store = StateStore(xdg_paths)
     value = state()
@@ -73,7 +100,7 @@ def test_state_round_trip_is_atomic_and_idempotent(xdg_paths: Paths) -> None:
     assert store.load("juice-shop") is None
 
 
-def test_v2_state_and_update_journal_round_trip_atomically(xdg_paths: Paths) -> None:
+def test_v3_state_and_update_journal_round_trip_atomically(xdg_paths: Paths) -> None:
     store = StateStore(xdg_paths)
     previous = RunState.create(
         lab_id="juice-shop",
@@ -86,6 +113,7 @@ def test_v2_state_and_update_journal_round_trip_atomically(xdg_paths: Paths) -> 
         resources=(ResourceRecord("container", "app", "d" * 64),),
         gateway_reference="registry.example.test/gateway@sha256:" + "3" * 64,
         upstream_port=3000,
+        runtime_policy=policy(),
         created_at="2026-09-06T00:00:00Z",
     )
     candidate = RunState.create(
@@ -99,9 +127,10 @@ def test_v2_state_and_update_journal_round_trip_atomically(xdg_paths: Paths) -> 
         resources=(),
         gateway_reference="registry.example.test/gateway@sha256:" + "2" * 64,
         upstream_port=3000,
+        runtime_policy=policy(),
         created_at="2026-09-06T00:00:00Z",
     )
-    assert candidate.schema_version == 2
+    assert candidate.schema_version == 3
     journal = UpdateJournal(
         1,
         "juice-shop",
@@ -117,6 +146,85 @@ def test_v2_state_and_update_journal_round_trip_atomically(xdg_paths: Paths) -> 
     assert store.update_path("juice-shop").stat().st_mode & 0o777 == 0o600
     store.delete_update("juice-shop")
     assert store.load_update("juice-shop") is None
+
+
+def test_runtime_policy_snapshot_and_update_journal_fail_closed() -> None:
+    raw_policy = {
+        "memory_mb": 512,
+        "cpus": 0.5,
+        "pids": 256,
+        "read_only_root": True,
+        "outbound_required": False,
+        "ephemeral_storage": {"uid": 65532, "gid": 65532, "seeded": [], "empty": []},
+        "friendly_hostname": "juice-shop.test",
+        "health_timeout_seconds": 120,
+        "services": [
+            {
+                "name": "web",
+                "image_role": "application",
+                "internal_port": 3000,
+                "protocol": "http",
+                "health_path": "/",
+                "identity_regex": "OWASP Juice Shop",
+            }
+        ],
+    }
+    for key, invalid in (
+        ("memory_mb", True),
+        ("read_only_root", False),
+        ("outbound_required", "no"),
+        ("friendly_hostname", "localhost"),
+        ("health_timeout_seconds", True),
+    ):
+        invalid_policy = dict(raw_policy)
+        invalid_policy[key] = invalid
+        with pytest.raises(IntegrityError, match="runtime policy snapshot"):
+            RuntimePolicySnapshot.parse(invalid_policy)
+    unknown = dict(raw_policy)
+    unknown["unknown"] = True
+    with pytest.raises(IntegrityError, match="missing or unknown"):
+        RuntimePolicySnapshot.parse(unknown)
+
+    previous = RunState.create(
+        lab_id="juice-shop",
+        run_id="a" * 32,
+        manifest_identity="b" * 64,
+        host_port=80,
+        trusted=True,
+        requested_reference="registry.example.test/app@sha256:" + "c" * 64,
+        resolved_digest="sha256:" + "c" * 64,
+        resources=(),
+        gateway_reference="registry.example.test/gateway@sha256:" + "3" * 64,
+        upstream_port=3000,
+        created_at="2026-09-06T00:00:00Z",
+    )
+    candidate = dataclasses.replace(
+        previous,
+        run_id="d" * 32,
+        manifest_identity="e" * 64,
+        host_port=28080,
+    )
+    legacy = UpdateJournal(
+        1,
+        "juice-shop",
+        "staged",
+        previous,
+        candidate,
+        ("application", "gateway"),
+        28080,
+    )
+    persisted = json.loads(json.dumps(legacy.serializable()))
+    with pytest.raises(IntegrityError, match="trusted rollback snapshot"):
+        UpdateJournal.parse(persisted)
+
+    mismatched_gateway = dataclasses.replace(
+        previous,
+        schema_version=3,
+        upstream_port=3001,
+        runtime_policy=policy(),
+    )
+    with pytest.raises(IntegrityError, match="health services differ"):
+        RunState.parse(json.loads(json.dumps(mismatched_gateway.serializable())))
 
 
 def test_state_fails_closed_on_unknown_data_and_symlink(xdg_paths: Paths, tmp_path: Path) -> None:
@@ -150,19 +258,19 @@ def test_state_rejects_duplicate_keys_unsafe_mode_and_noncanonical_time(
     path.chmod(0o640)
     with pytest.raises(IntegrityError, match="unsafe type"):
         store.load("juice-shop")
-    raw = json.loads(json.dumps(state(), default=lambda item: item.__dict__))
+    raw = serialized_state()
     raw["created_at"] = "2026-09-06T02:00:00+02:00"
     with pytest.raises(IntegrityError, match="creation timestamp"):
         RunState.parse(raw)
 
 
 def test_state_rejects_boolean_port_and_reference_digest_mismatch() -> None:
-    raw = json.loads(json.dumps(state(), default=lambda item: item.__dict__))
+    raw = serialized_state()
     raw["host_port"] = True
     with pytest.raises(IntegrityError, match="host port"):
         RunState.parse(raw)
 
-    raw = json.loads(json.dumps(state(), default=lambda item: item.__dict__))
+    raw = serialized_state()
     raw["resolved_digest"] = "sha256:" + "f" * 64
     with pytest.raises(IntegrityError, match="requested reference"):
         RunState.parse(raw)
@@ -180,11 +288,11 @@ def test_state_filename_is_bound_to_the_recorded_lab(xdg_paths: Paths) -> None:
 
 
 def test_state_rejects_untrusted_terminal_and_resource_fields() -> None:
-    value = json.loads(json.dumps(state(), default=lambda item: item.__dict__))
+    value = serialized_state()
     value["requested_reference"] = "image@sha256:" + "c" * 64 + "\nterminal"
     with pytest.raises(IntegrityError, match="requested reference"):
         RunState.parse(value)
-    value = json.loads(json.dumps(state(), default=lambda item: item.__dict__))
+    value = serialized_state()
     value["resources"][0]["kind"] = "host"
     with pytest.raises(IntegrityError, match="resource kind"):
         RunState.parse(value)

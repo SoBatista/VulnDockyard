@@ -19,7 +19,7 @@ from typing import Any, cast
 
 from .errors import IntegrityError, PreflightError
 from .jsonio import StrictJSONError, strict_json_loads
-from .models import DIGEST, LAB_ID, OCI_NAME, UTC_TIMESTAMP
+from .models import DIGEST, HOSTNAME, LAB_ID, OCI_NAME, UTC_TIMESTAMP, EphemeralStorage, Service
 from .paths import Paths
 
 
@@ -28,6 +28,91 @@ class ResourceRecord:
     kind: str
     name: str
     object_id: str
+
+
+@dataclass(frozen=True)
+class RuntimePolicySnapshot:
+    memory_mb: int
+    cpus: float
+    pids: int
+    read_only_root: bool
+    outbound_required: bool
+    ephemeral_storage: EphemeralStorage
+    friendly_hostname: str
+    health_timeout_seconds: int
+    services: tuple[Service, ...]
+
+    @classmethod
+    def parse(cls, value: object) -> RuntimePolicySnapshot:
+        if not isinstance(value, dict):
+            raise IntegrityError("runtime policy snapshot must be an object")
+        data = cast(dict[str, Any], value)
+        keys = {
+            "memory_mb",
+            "cpus",
+            "pids",
+            "read_only_root",
+            "outbound_required",
+            "ephemeral_storage",
+            "friendly_hostname",
+            "health_timeout_seconds",
+            "services",
+        }
+        if data.keys() != keys:
+            raise IntegrityError("runtime policy snapshot contains missing or unknown fields")
+        memory = data["memory_mb"]
+        cpus = data["cpus"]
+        pids = data["pids"]
+        if (
+            not isinstance(memory, int)
+            or isinstance(memory, bool)
+            or not 128 <= memory <= 16_384
+            or not isinstance(cpus, int | float)
+            or isinstance(cpus, bool)
+            or not 0.1 <= float(cpus) <= 8
+            or not isinstance(pids, int)
+            or isinstance(pids, bool)
+            or not 16 <= pids <= 4096
+        ):
+            raise IntegrityError("runtime policy snapshot resource limits are invalid")
+        if data["read_only_root"] is not True:
+            raise IntegrityError("runtime policy snapshot must require a read-only root")
+        if not isinstance(data["outbound_required"], bool):
+            raise IntegrityError("runtime policy snapshot outbound marker is invalid")
+        hostname = data["friendly_hostname"]
+        timeout = data["health_timeout_seconds"]
+        raw_services = data["services"]
+        if not isinstance(hostname, str) or HOSTNAME.fullmatch(hostname) is None:
+            raise IntegrityError("runtime policy snapshot hostname is invalid")
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 900:
+            raise IntegrityError("runtime policy snapshot health timeout is invalid")
+        if not isinstance(raw_services, list) or not raw_services:
+            raise IntegrityError("runtime policy snapshot services must be a non-empty array")
+        services = tuple(Service.parse(item) for item in raw_services)
+        names = [service.name for service in services]
+        if (
+            len(names) != len(set(names))
+            or len({service.internal_port for service in services}) != 1
+            or any(
+                service.image_role != "application"
+                or service.protocol != "http"
+                or len(service.identity_regex) > 160
+                or not service.identity_regex.isprintable()
+                for service in services
+            )
+        ):
+            raise IntegrityError("runtime policy snapshot health services are invalid")
+        return cls(
+            memory,
+            float(cpus),
+            pids,
+            True,
+            data["outbound_required"],
+            EphemeralStorage.parse(data["ephemeral_storage"]),
+            hostname,
+            timeout,
+            services,
+        )
 
 
 @dataclass(frozen=True)
@@ -45,6 +130,7 @@ class RunState:
     resources: tuple[ResourceRecord, ...]
     gateway_reference: str | None
     upstream_port: int | None
+    runtime_policy: RuntimePolicySnapshot | None
 
     @classmethod
     def create(
@@ -60,12 +146,15 @@ class RunState:
         resources: tuple[ResourceRecord, ...],
         gateway_reference: str | None = None,
         upstream_port: int | None = None,
+        runtime_policy: RuntimePolicySnapshot | None = None,
         created_at: str | None = None,
     ) -> RunState:
         if (gateway_reference is None) != (upstream_port is None):
             raise ValueError("gateway reference and upstream port must be recorded together")
+        if runtime_policy is not None and gateway_reference is None:
+            raise ValueError("runtime policy requires a complete gateway snapshot")
         return cls(
-            2 if gateway_reference is not None else 1,
+            3 if runtime_policy is not None else 2 if gateway_reference is not None else 1,
             lab_id,
             run_id,
             manifest_identity,
@@ -79,6 +168,7 @@ class RunState:
             resources,
             gateway_reference,
             upstream_port,
+            runtime_policy,
         )
 
     @classmethod
@@ -101,14 +191,17 @@ class RunState:
         }
         schema_version = data.get("schema_version")
         v2_keys = common_keys | {"gateway_reference", "upstream_port"}
+        v3_keys = v2_keys | {"runtime_policy"}
         keys_valid = (
-            data.keys() == v2_keys
+            data.keys() == v3_keys
+            if schema_version == 3
+            else data.keys() == v2_keys
             if schema_version == 2
             else data.keys() == common_keys or data.keys() == v2_keys
         )
         if not keys_valid:
             raise IntegrityError("run state contains missing or unknown fields")
-        if schema_version not in {1, 2} or data["manifest_version"] != 1:
+        if schema_version not in {1, 2, 3} or data["manifest_version"] != 1:
             raise IntegrityError("unsupported run state version")
         if (
             not isinstance(data["host_port"], int)
@@ -152,7 +245,7 @@ class RunState:
             and (data["gateway_reference"] is not None or data["upstream_port"] is not None)
         ):
             raise IntegrityError("legacy run state contains invalid rollback fields")
-        if schema_version == 2:
+        if schema_version in {2, 3}:
             gateway_reference = data["gateway_reference"]
             upstream_port = data["upstream_port"]
             if not isinstance(gateway_reference, str) or "@" not in gateway_reference:
@@ -166,6 +259,13 @@ class RunState:
                 or not 1 <= upstream_port <= 65535
             ):
                 raise IntegrityError("run state upstream port is invalid")
+        runtime_policy: RuntimePolicySnapshot | None = None
+        if schema_version == 3:
+            runtime_policy = RuntimePolicySnapshot.parse(data["runtime_policy"])
+            if upstream_port is None or any(
+                service.internal_port != upstream_port for service in runtime_policy.services
+            ):
+                raise IntegrityError("run state health services differ from its gateway snapshot")
         if UTC_TIMESTAMP.fullmatch(data["created_at"]) is None:
             raise IntegrityError("run state creation timestamp is invalid")
         try:
@@ -215,6 +315,7 @@ class RunState:
             tuple(resources),
             gateway_reference,
             upstream_port,
+            runtime_policy,
         )
 
     def serializable(self) -> dict[str, Any]:
@@ -222,6 +323,9 @@ class RunState:
         if self.schema_version == 1:
             value.pop("gateway_reference")
             value.pop("upstream_port")
+            value.pop("runtime_policy")
+        elif self.schema_version == 2:
+            value.pop("runtime_policy")
         return value
 
 
@@ -269,9 +373,11 @@ class UpdateJournal:
             not previous.trusted
             or previous.gateway_reference is None
             or previous.upstream_port is None
+            or previous.runtime_policy is None
             or not candidate.trusted
             or candidate.gateway_reference is None
             or candidate.upstream_port is None
+            or candidate.runtime_policy is None
         ):
             raise IntegrityError("update journal lacks a trusted rollback snapshot")
         if phase not in {"staged", "cutover", "ready"}:
