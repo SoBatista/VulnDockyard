@@ -9,9 +9,24 @@ and [`lock-v1.schema.json`](../src/vulndockyard/data/schemas/lock-v1.schema.json
 The controller's strict parser is authoritative. It rejects unknown fields,
 non-HTTPS evidence URLs, non-`.test` hostnames, invalid IDs, unsupported backends,
 partial commits, malformed ports/dates, trust/status contradictions, service/image
-role mismatches, and every missing digest on a runnable adapter. JSON Schema is
-provided for editors and external tooling; tests keep its required fields aligned
-with the parser.
+role mismatches, and every missing digest on a runnable adapter. The Draft 2020-12
+schemas are executable contracts for editors and external tooling, not just field
+inventories: CI validates every packaged manifest and lock with `jsonschema` and a
+format checker, and negative parity cases prove that schema-expressible parser
+rejections remain rejected by both layers.
+
+The manifest schema enforces runnable commit, tag, trust, evidence, image-role,
+architecture, service-protocol, health, initialization, verification, read-only
+root, and non-root storage requirements. It also enforces quarantined trust and
+blocked verification for both non-runnable statuses. The lock schema enforces
+HTTPS trust and optional evidence URLs, non-empty trust evidence, canonical UTC
+verification timestamps, supported unique platforms, and a non-empty HTTPS
+evidence URL for resolved redistribution decisions. The parser remains necessary
+for relationships that portable JSON Schema cannot express without project-
+specific extensions:
+unique role and service-name properties, a shared service port, cross-list mount
+name/path uniqueness and non-overlap, aggregate mount size, exact persistence-to-
+mount set equality, and manifest/lock/filename catalogue binding.
 
 `ephemeral_storage` declares every writable mount needed by a read-only
 application root. `uid` and `gid` are the non-root numeric identity used by the
