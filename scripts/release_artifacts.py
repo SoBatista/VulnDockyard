@@ -22,8 +22,15 @@ from scripts.check_version import authoritative_version  # noqa: E402
 from scripts.generate_sbom import generate as generate_sbom  # noqa: E402
 
 
+def _git() -> str:
+    value = shutil.which("git")
+    if value is None:
+        raise RuntimeError("required executable is unavailable: git")
+    return value
+
+
 def _archive(prefix: str = "") -> bytes:
-    command = ["git", "archive", "--format=tar"]
+    command = [_git(), "archive", "--format=tar"]
     if prefix:
         command.append(f"--prefix={prefix}")
     command.append("HEAD")
@@ -61,8 +68,8 @@ def _extract(content: bytes, destination: Path) -> Path:
 
 
 def _epoch() -> int:
-    value = subprocess.run(
-        ("git", "show", "-s", "--format=%ct", "HEAD"),
+    value = subprocess.run(  # noqa: S603 - resolved Git executable and fixed arguments
+        (_git(), "show", "-s", "--format=%ct", "HEAD"),
         cwd=ROOT,
         check=True,
         capture_output=True,

@@ -28,9 +28,28 @@ def main() -> int:
         )
         python = venv / "bin" / "python"
         subprocess.run(  # noqa: S603 - clean-venv interpreter and reviewed wheel path
-            (str(python), "-m", "pip", "install", "--disable-pip-version-check", str(wheel)),
+            (
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--require-hashes",
+                "-r",
+                str(ROOT / "requirements-dev.lock"),
+            ),
             check=True,
             timeout=180,
+        )
+        subprocess.run(  # noqa: S603 - clean-venv interpreter and reviewed wheel path
+            (str(python), "-m", "pip", "install", "--no-deps", str(wheel)),
+            check=True,
+            timeout=60,
+        )
+        subprocess.run(  # noqa: S603 - clean-venv interpreter
+            (str(python), "-m", "pip", "check"),
+            check=True,
+            timeout=30,
         )
         version_result = subprocess.run(  # noqa: S603 - clean-venv interpreter
             (str(python), "-m", "vulndockyard", "version", "--json"),

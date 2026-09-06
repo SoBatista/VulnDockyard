@@ -10,10 +10,22 @@ git clone https://github.com/SoBatista/VulnDockyard.git
 cd VulnDockyard
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install --require-hashes -r requirements-dev.lock
+python -m pip install --no-deps --no-build-isolation -e .
 pre-commit install
 scripts/self-test.sh
 ```
+
+`requirements-dev.lock` is the pip-consumable, fully hashed projection of
+`uv.lock`, including the runtime, build, test, and release closure. Refresh both
+only in a dependency-review change with `uv lock`, then
+`uv export --frozen --extra dev --no-emit-project --format requirements.txt
+--no-header`. Repository checks reject missing packages, version drift, and any
+artifact hash that differs between the two locks.
+
+Do not run `.venv/bin/vulndockyard`, an editable install, or project Python code
+with `sudo`. Use the reviewed standalone helper contract described by
+`vulndockyard hosts helper` when manually testing real `/etc/hosts` integration.
 
 The complete self-test runs real digest-pinned Docker smoke tests and requires an
 available loopback port. Use focused unit commands while iterating; do not mark a
@@ -46,4 +58,3 @@ behavior require explicit review so a training exercise is not accidentally fixe
 
 PRs require passing checks, resolved conversations, linear history, and maintainer
 approval to merge. The project never automerges.
-

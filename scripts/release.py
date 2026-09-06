@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import io
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,10 +20,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import check_version as version_tools  # noqa: E402
-from scripts.release_artifacts import build as build_artifacts  # noqa: E402
 
 ORIGIN = "https://github.com/SoBatista/VulnDockyard.git"
+HOSTED_CHECKOUT_ORIGIN = "https://github.com/SoBatista/VulnDockyard"
 REPOSITORY = "SoBatista/VulnDockyard"
+SHA256_LINE = re.compile(r"^(?P<digest>[0-9a-f]{64})  (?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)$")
 
 
 def _run(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -45,7 +50,10 @@ def _release_context() -> tuple[str, str]:
         raise RuntimeError("publication is allowed only from a manual main workflow run")
     if os.environ.get("GITHUB_REPOSITORY") != REPOSITORY:
         raise RuntimeError("publication repository identity does not match")
-    if _run("git", "remote", "get-url", "origin").stdout.strip() != ORIGIN:
+    if _run("git", "remote", "get-url", "origin").stdout.strip() not in {
+        ORIGIN,
+        HOSTED_CHECKOUT_ORIGIN,
+    }:
         raise RuntimeError("origin URL does not match the authorized repository")
     head = _run("git", "rev-parse", "HEAD").stdout.strip()
     if _run("git", "status", "--porcelain").stdout:
@@ -71,7 +79,22 @@ def _verify_main_ci(head: str) -> None:
         raise RuntimeError("CI authorization must come from a main push or manual main run")
 
 
+def _reviewed_notes(version: str) -> str:
+    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    match = re.search(
+        rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}\n"
+        r"(?P<body>.*?)(?=^## |\Z)",
+        text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if match is None or not match.group("body").strip():
+        raise RuntimeError(f"changelog has no release notes for {version}")
+    return match.group("body").strip() + "\n"
+
+
 def prepare() -> None:
+    from scripts.release_artifacts import build as build_artifacts
+
     _, head = _release_context()
     _verify_main_ci(head)
     build_artifacts(ROOT / "artifacts" / "release")
@@ -95,24 +118,125 @@ def _remote_tag_commit(tag: str) -> str | None:
     return dereferenced[0]
 
 
-def _verify_sums(directory: Path) -> None:
-    lines = (directory / "SHA256SUMS").read_text(encoding="ascii").splitlines()
+def _expected_artifacts(version: str) -> set[str]:
+    return {
+        "RELEASE_NOTES.md",
+        "SHA256SUMS",
+        f"VulnDockyard-{version}.tar.gz",
+        f"vulndockyard-{version}-py3-none-any.whl",
+        f"vulndockyard-{version}.spdx.json",
+        f"vulndockyard-{version}.tar.gz",
+    }
+
+
+def _verify_sums(directory: Path, version: str) -> None:
+    if directory.is_symlink():
+        raise RuntimeError("release artifact root must not be a symlink")
+    resolved = directory.resolve(strict=True)
+    if not resolved.is_dir():
+        raise RuntimeError("release artifact root must be a real directory")
+    actual = {path.name for path in resolved.iterdir() if path.is_file() and not path.is_symlink()}
+    expected = _expected_artifacts(version)
+    if actual != expected:
+        raise RuntimeError(
+            f"release artifact set mismatch: expected {sorted(expected)}, found {sorted(actual)}"
+        )
+    sums_path = resolved / "SHA256SUMS"
+    lines = sums_path.read_text(encoding="ascii").splitlines()
+    entries: dict[str, str] = {}
     for line in lines:
-        digest, separator, name = line.partition("  ")
-        path = directory / name
-        if (
-            not separator
-            or not path.is_file()
-            or hashlib.sha256(path.read_bytes()).hexdigest() != digest
-        ):
+        match = SHA256_LINE.fullmatch(line)
+        if match is None:
+            raise RuntimeError("SHA256SUMS contains a malformed entry")
+        name = match.group("name")
+        if name in entries:
+            raise RuntimeError(f"SHA256SUMS contains a duplicate entry: {name}")
+        entries[name] = match.group("digest")
+    expected_sums = expected - {"SHA256SUMS"}
+    if set(entries) != expected_sums:
+        raise RuntimeError("SHA256SUMS does not cover the exact release artifact set")
+    for name, digest in entries.items():
+        path = resolved / name
+        if path.resolve(strict=True).parent != resolved or path.is_symlink():
+            raise RuntimeError(f"release artifact escaped its directory: {name}")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise RuntimeError(f"published checksum mismatch: {name}")
+
+
+def _release_metadata(
+    value: object, *, tag: str, version: str, notes: str, expected_assets: set[str]
+) -> set[str]:
+    if not isinstance(value, dict):
+        raise RuntimeError("existing release metadata is malformed")
+    expected = {
+        "tagName": tag,
+        "name": f"VulnDockyard {version}",
+        "body": notes,
+        "isDraft": False,
+        "isPrerelease": False,
+    }
+    mismatches = [
+        key for key, expected_value in expected.items() if value.get(key) != expected_value
+    ]
+    if mismatches:
+        raise RuntimeError(f"existing release metadata differs: {', '.join(mismatches)}")
+    raw_assets = value.get("assets")
+    if not isinstance(raw_assets, list) or any(not isinstance(item, dict) for item in raw_assets):
+        raise RuntimeError("existing release assets are malformed")
+    names = [item.get("name") for item in raw_assets]
+    if any(not isinstance(name, str) for name in names) or len(names) != len(set(names)):
+        raise RuntimeError("existing release contains malformed or duplicate asset names")
+    remote_assets = {str(name) for name in names}
+    unexpected = sorted(remote_assets - expected_assets)
+    if unexpected:
+        raise RuntimeError(f"existing release contains unexpected assets: {unexpected}")
+    return remote_assets
+
+
+def _release_view(tag: str) -> subprocess.CompletedProcess[str]:
+    return _run(
+        "gh",
+        "release",
+        "view",
+        tag,
+        "--json",
+        "assets,body,isDraft,isPrerelease,name,tagName",
+        check=False,
+    )
+
+
+def _source_archive(version: str) -> bytes:
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError("required executable is unavailable: git")
+    source = subprocess.run(  # noqa: S603 - fixed git command and validated version
+        (
+            git,
+            "archive",
+            "--format=tar",
+            f"--prefix=VulnDockyard-{version}/",
+            "HEAD",
+        ),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        timeout=60,
+    ).stdout
+    epoch = int(_run("git", "show", "-s", "--format=%ct", "HEAD").stdout.strip())
+    output = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=epoch) as compressed:
+        compressed.write(source)
+    return output.getvalue()
 
 
 def publish() -> None:
     version, head = _release_context()
     _verify_main_ci(head)
     artifact_root = ROOT / "artifacts" / "release"
-    _verify_sums(artifact_root)
+    _verify_sums(artifact_root, version)
+    notes = (artifact_root / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+    if notes != _reviewed_notes(version):
+        raise RuntimeError("release payload notes differ from the reviewed changelog")
     tag = f"v{version}"
     remote_commit = _remote_tag_commit(tag)
     if remote_commit is not None and remote_commit != head:
@@ -127,12 +251,8 @@ def publish() -> None:
         )
         _run("git", "tag", "--annotate", tag, "--message", f"VulnDockyard {version}", head)
         _run("git", "push", "origin", f"refs/tags/{tag}")
-    assets = sorted(
-        path
-        for path in artifact_root.iterdir()
-        if path.is_file() and path.name != "RELEASE_NOTES.md"
-    )
-    release = _run("gh", "release", "view", tag, "--json", "assets", check=False)
+    assets = sorted(path for path in artifact_root.iterdir() if path.is_file())
+    release = _release_view(tag)
     if release.returncode != 0:
         _run(
             "gh",
@@ -147,7 +267,13 @@ def publish() -> None:
             *(str(path) for path in assets),
         )
         return
-    remote_assets = {item["name"] for item in json.loads(release.stdout)["assets"]}
+    remote_assets = _release_metadata(
+        json.loads(release.stdout),
+        tag=tag,
+        version=version,
+        notes=notes,
+        expected_assets={path.name for path in assets},
+    )
     with tempfile.TemporaryDirectory(prefix="vdy-existing-release-") as temporary:
         target = Path(temporary)
         for asset in assets:
@@ -171,16 +297,57 @@ def verify_published() -> None:
     tag = f"v{version}"
     if _run("git", "cat-file", "-t", tag).stdout.strip() != "tag":
         raise RuntimeError("published tag is not annotated")
+    head = _run("git", "rev-parse", "HEAD").stdout.strip()
+    if _remote_tag_commit(tag) != head:
+        raise RuntimeError("published tag does not resolve to the checked-out commit")
     with tempfile.TemporaryDirectory(prefix="vdy-published-") as temporary:
         target = Path(temporary)
         _run("gh", "release", "download", tag, "--dir", str(target))
-        _verify_sums(target)
+        _verify_sums(target, version)
+        notes = (target / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+        if notes != _reviewed_notes(version):
+            raise RuntimeError("published release notes differ from the reviewed changelog")
+        release = _release_view(tag)
+        if release.returncode != 0:
+            raise RuntimeError("published release metadata is unavailable")
+        _release_metadata(
+            json.loads(release.stdout),
+            tag=tag,
+            version=version,
+            notes=notes,
+            expected_assets=_expected_artifacts(version),
+        )
+        source = target / f"VulnDockyard-{version}.tar.gz"
+        if (
+            hashlib.sha256(source.read_bytes()).digest()
+            != hashlib.sha256(_source_archive(version)).digest()
+        ):
+            raise RuntimeError("published source archive does not match the checked-out tag")
+        for artifact in sorted(target.iterdir()):
+            _run("gh", "attestation", "verify", str(artifact), "--repo", REPOSITORY)
         wheel = next(target.glob("*.whl"))
-        _run("gh", "attestation", "verify", str(wheel), "--repo", REPOSITORY)
+        from scripts.generate_sbom import generate as generate_sbom
+
+        generated_sbom = target / ".regenerated.spdx.json"
+        generate_sbom(wheel, generated_sbom)
+        published_sbom = target / f"vulndockyard-{version}.spdx.json"
+        if generated_sbom.read_bytes() != published_sbom.read_bytes():
+            raise RuntimeError("published SBOM does not describe the published wheel")
         venv = target / "venv"
         _run(sys.executable, "-m", "venv", str(venv))
         python = venv / "bin" / "python"
-        _run(str(python), "-m", "pip", "install", str(wheel))
+        _run(
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--require-hashes",
+            "-r",
+            str(ROOT / "requirements-dev.lock"),
+        )
+        _run(str(python), "-m", "pip", "install", "--no-deps", str(wheel))
+        _run(str(python), "-m", "pip", "check")
         result = _run(str(python), "-m", "vulndockyard", "version", "--json")
         if json.loads(result.stdout)["data"]["version"] != version:
             raise RuntimeError("published wheel CLI version does not match")

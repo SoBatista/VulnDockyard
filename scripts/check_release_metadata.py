@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +20,13 @@ LABELS = {"release:major", "release:minor", "release:patch"}
 ASSIGNMENT = re.compile(rb'^__version__ = "([^"]+)"$', re.MULTILINE)
 
 
+def _executable(name: str) -> str:
+    value = shutil.which(name)
+    if value is None:
+        raise RuntimeError(f"required executable is unavailable: {name}")
+    return value
+
+
 def _version(value: str) -> tuple[int, int, int]:
     parts = value.split(".")
     if len(parts) != 3 or any(not part.isdigit() for part in parts):
@@ -30,7 +38,7 @@ def _base_version(base_sha: str) -> str | None:
     if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
         raise RuntimeError("base commit must be a full lowercase SHA")
     result = subprocess.run(  # noqa: S603 - validated SHA, fixed git subcommand
-        ("git", "show", f"{base_sha}:src/vulndockyard/_version.py"),
+        (_executable("git"), "show", f"{base_sha}:src/vulndockyard/_version.py"),
         cwd=ROOT,
         capture_output=True,
         check=False,
@@ -38,10 +46,36 @@ def _base_version(base_sha: str) -> str | None:
     )
     if result.returncode != 0:
         return None
-    matches = ASSIGNMENT.findall(result.stdout)
+    matches: list[bytes] = ASSIGNMENT.findall(result.stdout)
     if len(matches) != 1:
         raise RuntimeError("base branch has malformed authoritative version")
     return matches[0].decode()
+
+
+def _bootstrap_release_is_ancestor(base_sha: str) -> bool:
+    tag = subprocess.run(  # noqa: S603 - resolved Git executable and fixed arguments
+        (_executable("git"), "rev-parse", "--verify", "refs/tags/v1.0.0^{commit}"),
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    if tag.returncode != 0:
+        return False
+    relation = subprocess.run(  # noqa: S603 - validated SHA and fixed tag
+        (
+            _executable("git"),
+            "merge-base",
+            "--is-ancestor",
+            tag.stdout.strip(),
+            base_sha,
+        ),
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    return relation.returncode == 0
 
 
 def _live_labels() -> set[str]:
@@ -51,7 +85,7 @@ def _live_labels() -> set[str]:
         raise RuntimeError("trusted repository and pull-request context are required")
     result = subprocess.run(  # noqa: S603 - fixed gh command, numeric PR and exact repository
         (
-            "gh",
+            _executable("gh"),
             "api",
             "--paginate",
             f"repos/{repository}/issues/{number}/labels",
@@ -69,10 +103,15 @@ def _live_labels() -> set[str]:
 
 def check() -> None:
     current = authoritative_version()
-    base = _base_version(os.environ.get("VDY_BASE_SHA", ""))
+    base_sha = os.environ.get("VDY_BASE_SHA", "")
+    base = _base_version(base_sha)
     if base is None:
         if current != "1.0.0":
             raise RuntimeError("the bootstrap tree must be exactly version 1.0.0")
+        return
+    if not _bootstrap_release_is_ancestor(base_sha):
+        if current != "1.0.0" or base != "1.0.0":
+            raise RuntimeError("pre-release bootstrap changes must remain exactly version 1.0.0")
         return
     selected = _live_labels() & LABELS
     if len(selected) != 1:

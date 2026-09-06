@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,8 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> int:
-    result = subprocess.run(
-        ("git", "status", "--porcelain=v1", "--untracked-files=all"),
+    git = shutil.which("git")
+    if git is None:
+        print("required executable is unavailable: git", file=sys.stderr)
+        return 1
+    result = subprocess.run(  # noqa: S603 - resolved Git executable and fixed arguments
+        (git, "status", "--porcelain=v1", "--untracked-files=all"),
         cwd=ROOT,
         check=True,
         capture_output=True,

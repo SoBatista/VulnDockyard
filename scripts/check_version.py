@@ -7,6 +7,7 @@ import importlib.util
 import re
 import sys
 import tomllib
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +21,7 @@ def authoritative_version() -> str:
     )
     if len(matches) != 1 or SEMVER.fullmatch(matches[0]) is None:
         raise RuntimeError("_version.py must contain one stable SemVer assignment")
-    return matches[0]
+    return str(matches[0])
 
 
 def check() -> str:
@@ -40,6 +41,27 @@ def check() -> str:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     if changelog.count(f"## [{version}]") != 1:
         failures.append("changelog must contain exactly one current version section")
+    if changelog.count("## [Unreleased]") != 1:
+        failures.append("changelog must contain exactly one Unreleased section")
+    release_heading = re.search(
+        rf"^## \[{re.escape(version)}\] - (?P<date>\d{{4}}-\d{{2}}-\d{{2}})$",
+        changelog,
+        flags=re.MULTILINE,
+    )
+    if release_heading is None:
+        failures.append("changelog current version needs one dated release heading")
+    else:
+        try:
+            date.fromisoformat(release_heading.group("date"))
+        except ValueError:
+            failures.append("changelog release date is not a calendar date")
+    expected_links = (
+        f"[Unreleased]: https://github.com/SoBatista/VulnDockyard/compare/v{version}...HEAD",
+        f"[{version}]: https://github.com/SoBatista/VulnDockyard/releases/tag/v{version}",
+    )
+    for expected in expected_links:
+        if changelog.count(expected) != 1:
+            failures.append(f"changelog version projection is missing: {expected}")
     spec = importlib.util.spec_from_file_location(
         "vulndockyard_version", ROOT / "src" / "vulndockyard" / "_version.py"
     )

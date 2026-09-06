@@ -11,9 +11,79 @@ import zipfile
 from email.parser import BytesParser
 from pathlib import Path
 
+REQUIREMENT = re.compile(
+    r"^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"(?:\[(?P<extras>[A-Za-z0-9._,-]+)\])?"
+    r"\s*==\s*(?P<version>[A-Za-z0-9][A-Za-z0-9.!+_-]*)"
+    r"(?:\s*;\s*(?P<marker>.+))?\s*$"
+)
+
 
 def _identifier(value: str) -> str:
     return "SPDXRef-" + re.sub(r"[^A-Za-z0-9.-]", "-", value)
+
+
+def _normalized_name(value: str) -> str:
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def _runtime_dependencies(metadata: object) -> tuple[list[dict[str, object]], list[dict[str, str]]]:
+    get_all = getattr(metadata, "get_all", None)
+    requirements = get_all("Requires-Dist", []) if callable(get_all) else []
+    packages: list[dict[str, object]] = []
+    relationships: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_requirement in sorted(str(value) for value in requirements):
+        match = REQUIREMENT.fullmatch(raw_requirement)
+        if match is None:
+            raise RuntimeError(
+                "runtime dependency must use an exact == version for deterministic SBOM output: "
+                f"{raw_requirement}"
+            )
+        marker = match.group("marker") or ""
+        if re.search(r"\bextra\b", marker):
+            continue
+        name = match.group("name")
+        normalized = _normalized_name(name)
+        version = match.group("version")
+        key = (normalized, version)
+        if key in seen:
+            continue
+        seen.add(key)
+        identifier = _identifier(f"Dependency-{normalized}-{version}")
+        package: dict[str, object] = {
+            "SPDXID": identifier,
+            "name": name,
+            "versionInfo": version,
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False,
+            "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": "NOASSERTION",
+            "primaryPackagePurpose": "LIBRARY",
+            "externalRefs": [
+                {
+                    "referenceCategory": "PACKAGE-MANAGER",
+                    "referenceType": "purl",
+                    "referenceLocator": f"pkg:pypi/{normalized}@{version}",
+                }
+            ],
+        }
+        qualifiers = []
+        if match.group("extras"):
+            qualifiers.append(f"extras={match.group('extras')}")
+        if marker:
+            qualifiers.append(f"marker={marker}")
+        if qualifiers:
+            package["comment"] = "Runtime requirement qualifiers: " + "; ".join(qualifiers)
+        packages.append(package)
+        relationships.append(
+            {
+                "spdxElementId": "SPDXRef-Package",
+                "relationshipType": "DEPENDS_ON",
+                "relatedSpdxElement": identifier,
+            }
+        )
+    return packages, relationships
 
 
 def generate(wheel: Path, output: Path) -> None:
@@ -29,16 +99,23 @@ def generate(wheel: Path, output: Path) -> None:
         version = str(metadata["Version"])
         files = []
         relationships = []
+        file_sha1s = []
         for member in sorted(archive.namelist()):
             if member.endswith("/"):
                 continue
             identifier = _identifier(member)
-            digest = hashlib.sha256(archive.read(member)).hexdigest()
+            content = archive.read(member)
+            digest = hashlib.sha256(content).hexdigest()
+            sha1 = hashlib.sha1(content, usedforsecurity=False).hexdigest()
+            file_sha1s.append(sha1)
             files.append(
                 {
                     "SPDXID": identifier,
                     "fileName": member,
-                    "checksums": [{"algorithm": "SHA256", "checksumValue": digest}],
+                    "checksums": [
+                        {"algorithm": "SHA1", "checksumValue": sha1},
+                        {"algorithm": "SHA256", "checksumValue": digest},
+                    ],
                 }
             )
             relationships.append(
@@ -48,6 +125,10 @@ def generate(wheel: Path, output: Path) -> None:
                     "relatedSpdxElement": identifier,
                 }
             )
+    dependency_packages, dependency_relationships = _runtime_dependencies(metadata)
+    verification_code = hashlib.sha1(
+        "".join(sorted(file_sha1s)).encode("ascii"), usedforsecurity=False
+    ).hexdigest()
     document = {
         "spdxVersion": "SPDX-2.3",
         "dataLicense": "CC0-1.0",
@@ -65,8 +146,10 @@ def generate(wheel: Path, output: Path) -> None:
                 "versionInfo": version,
                 "downloadLocation": "NOASSERTION",
                 "filesAnalyzed": True,
+                "packageVerificationCode": {"packageVerificationCodeValue": verification_code},
                 "licenseConcluded": "Apache-2.0",
                 "licenseDeclared": "Apache-2.0",
+                "primaryPackagePurpose": "APPLICATION",
                 "checksums": [{"algorithm": "SHA256", "checksumValue": wheel_sha}],
                 "externalRefs": [
                     {
@@ -75,7 +158,8 @@ def generate(wheel: Path, output: Path) -> None:
                         "referenceLocator": f"pkg:pypi/{name}@{version}",
                     }
                 ],
-            }
+            },
+            *dependency_packages,
         ],
         "files": files,
         "relationships": [
@@ -84,6 +168,7 @@ def generate(wheel: Path, output: Path) -> None:
                 "relationshipType": "DESCRIBES",
                 "relatedSpdxElement": "SPDXRef-Package",
             },
+            *dependency_relationships,
             *relationships,
         ],
     }
