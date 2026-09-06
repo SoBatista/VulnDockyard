@@ -15,9 +15,11 @@ Target release: 1.0.0 (not yet released).
 - Fail-closed versioned lab manifests, immutable locks, four image-trust levels,
   and twelve officially researched initial catalogue entries.
 - Digest-pinned OWASP Juice Shop reference adapter with loopback gateway,
-  Docker 28 isolated application networking, a read-only root with bounded
-  ephemeral storage, exact ownership labels, bounded lifecycle, identity
-  readiness, clean reset, transactional update primitives, and safe cleanup.
+  Docker 28 isolated application networking and exact endpoint topology, a
+  read-only root with bounded hardened ephemeral storage, validated seed helper,
+  complete rollback-policy and health snapshots, crash-safe transient adoption,
+  exact ownership labels, bounded lifecycle, identity readiness, clean reset,
+  transactional updates, and safe cleanup.
 - Atomic marker-delimited `.test` hosts management that preserves unrelated data.
 - Pinned, checksum-verified, XDG-cached Vulhub metadata provider with a
   fail-closed Compose validator and an initially empty reviewed runnable allowlist.

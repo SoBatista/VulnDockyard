@@ -57,7 +57,11 @@ Runnable lab execution requires Docker Engine 28.0.0 or newer so the internal
 application bridge can use isolated IPv4 gateway mode. `pull`, `up`, `update`,
 `restart`, `rebuild`, `reset`, and `verify` fail closed on an older or malformed
 server version. `stop`/`down`, `remove`, `purge`, and the residual-resource audit
-remain available for exact owned-resource recovery.
+remain available for exact owned-resource recovery. If an update was interrupted,
+these cleanup commands resolve its journal without creating or starting containers.
+Observational `status`, `logs`, `open`, and `verify` commands never recover a
+pending update; they fail with explicit execution-recovery and cleanup-recovery
+choices instead of unexpectedly starting a vulnerable lab.
 
 This minimum prevents the isolated application bridge from receiving a default
 outbound route; it is a containment boundary, not a general compatibility floor.

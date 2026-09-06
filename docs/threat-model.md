@@ -23,6 +23,13 @@ visitor; containment must assume that outcome.
 - Effective container image, user, command, namespaces, capabilities, devices,
   resource/log limits, writable mounts, and exact network attachments are
   revalidated against the reviewed runtime contract during lifecycle inspection.
+- Managed networks reject foreign endpoints, and managed containers reject every
+  additional network attachment. Cleanup-only interruption recovery never starts
+  or creates a lab on an unsupported Engine.
+- Status, logs, open, and verification never perform execution-capable update
+  recovery. A rollback that restarts an application first restores its declared
+  volatile seed data and verifies the prior snapshot's identity. Transient
+  rollback seeders are journaled or adopted across every create/checkpoint window.
 - Only the constrained gateway publishes, and only on `127.0.0.1`.
 - No host network, privileged mode, runtime socket, devices, host PID/IPC/user
   namespace, broad bind mounts, or uncontrolled builds are permitted.

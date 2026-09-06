@@ -37,14 +37,26 @@ whose manifest identity differs from the installed lock and direct the operator
 to `update`; `rebuild` additionally refuses to replace an untrusted or otherwise
 different image reference because it cannot reproduce that runtime safely.
 
-The state snapshot records the prior digest-pinned gateway reference and upstream
-port. A strict, bounded, atomically replaced update journal records the prior and
-candidate states, temporary port, lifecycle roles, and cutover phase. If candidate
+The state snapshot records the prior digest-pinned gateway reference, upstream
+port, resource limits, egress contract, exact writable-storage contract, and
+bounded health paths, Host value, timeout, and identity markers. A legacy state
+without this complete snapshot cannot be a transactional rollback base. A strict,
+bounded, atomically replaced update journal records the prior and candidate states,
+temporary port, lifecycle roles, and cutover phase. If candidate
 startup or either identity verification fails, candidate resources are removed by
 exact ownership labels and IDs and the prior gateway is recreated when cutover had
-already removed it. On a later lifecycle command, an interrupted pre-activation
-phase rolls back; a journaled ready candidate completes activation and prior
-cleanup. Unknown or ambiguous resources still stop recovery safely.
+already removed it. The preserved deployment is revalidated against its recorded
+effective policy before candidate cleanup and, when restarted, must pass its own
+recorded readiness and identity contract before recovery completes. A rollback
+seeder is journaled after every add/remove checkpoint; an exact unjournaled seeder
+in the create/checkpoint interruption window is adopted and validated before it is
+discarded and seeding restarts cleanly. On a later execution-capable lifecycle
+command, an interrupted pre-activation phase rolls back; a journaled ready
+candidate completes activation and prior cleanup. `stop`, `remove`, and `purge`
+instead use an execution-free recovery path that only adopts or deletes exact
+owned resources. Observational `status`, `logs`, `open`, and `verify` commands
+refuse a pending journal rather than performing an implicit rollback. Unknown or
+ambiguous resources still stop recovery safely.
 
 A discovery result is never an execution candidate. When upstream reports a newer
 version but the installed package contains no corresponding reviewed manifest/lock,
