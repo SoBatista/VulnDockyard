@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.check_version import authoritative_version  # noqa: E402
+from scripts.check_version import check as check_version_projections  # noqa: E402
 
 LABELS = {"release:major", "release:minor", "release:patch"}
 ASSIGNMENT = re.compile(rb'^__version__ = "([^"]+)"$', re.MULTILINE)
@@ -93,6 +93,47 @@ def _base_changelog_has_bootstrap_release(base_sha: str) -> bool:
     )
 
 
+def _validate_reviewed_changelog(base: str, current: str, version: str) -> None:
+    heading = re.compile(rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$", re.MULTILINE)
+    if base == current:
+        raise RuntimeError("release pull request must change CHANGELOG.md")
+    if heading.search(base) is not None:
+        raise RuntimeError(f"release {version} section already exists on the base branch")
+    matches = list(heading.finditer(current))
+    if len(matches) != 1:
+        raise RuntimeError(f"release pull request must add one dated [{version}] section")
+    start = matches[0].end()
+    next_heading = re.search(r"^## ", current[start:], flags=re.MULTILINE)
+    end = start + next_heading.start() if next_heading is not None else len(current)
+    body = current[start:end].strip()
+    if (
+        re.search(r"^### \S", body, flags=re.MULTILINE) is None
+        or re.search(r"^- \S", body, flags=re.MULTILINE) is None
+    ):
+        raise RuntimeError(f"release {version} section must contain reviewed categorized notes")
+    release_link = f"[{version}]: https://github.com/SoBatista/VulnDockyard/releases/tag/v{version}"
+    if release_link in base or current.count(release_link) != 1:
+        raise RuntimeError(f"release {version} must add its exact immutable release link")
+
+
+def _reviewed_changelog_increment(base_sha: str, version: str) -> None:
+    result = subprocess.run(  # noqa: S603 - validated SHA, fixed git subcommand
+        (_executable("git"), "show", f"{base_sha}:CHANGELOG.md"),
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("could not inspect base CHANGELOG.md")
+    _validate_reviewed_changelog(
+        result.stdout,
+        (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"),
+        version,
+    )
+
+
 def _live_labels() -> set[str]:
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     number = os.environ.get("VDY_PR_NUMBER", "")
@@ -117,7 +158,7 @@ def _live_labels() -> set[str]:
 
 
 def check() -> None:
-    current = authoritative_version()
+    current = check_version_projections()
     base_sha = os.environ.get("VDY_BASE_SHA", "")
     base = _base_version(base_sha)
     if base is None:
@@ -147,6 +188,7 @@ def check() -> None:
     if _version(current) != expected:
         expected_text = ".".join(str(part) for part in expected)
         raise RuntimeError(f"{label} requires exact version {expected_text}, found {current}")
+    _reviewed_changelog_increment(base_sha, current)
 
 
 def main() -> int:
