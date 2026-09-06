@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from vulndockyard.catalogue import Catalogue, canonical_json, identity
+from vulndockyard.catalogue import Catalogue, canonical_json, identity, template_identity
 from vulndockyard.errors import IntegrityError, NotFoundError
 from vulndockyard.models import Lockfile, Manifest
 
@@ -45,6 +45,15 @@ def test_runnable_images_are_digest_pinned_and_locked() -> None:
             (image.name, image.digest) for image in lab.lock.images
         }
         assert all(image.reference.count("@sha256:") == 1 for image in lab.manifest.images)
+        assert lab.lock.template_sha256 == template_identity(lab.manifest)
+
+
+def test_juice_shop_records_the_gateway_only_caddy_capability_exception() -> None:
+    capabilities = Catalogue().get("juice-shop").manifest.raw["dangerous_capabilities"]
+    assert capabilities == [
+        "gateway: CAP_NET_BIND_SERVICE only; required to execute the locked official Caddy "
+        "binary after cap_drop=ALL"
+    ]
 
 
 def test_quarantined_lab_refuses_image_reference() -> None:
@@ -79,6 +88,12 @@ def test_canonical_identity_is_deterministic() -> None:
         (lambda value: value["upstream"].update({"repository": "file:///tmp/source"}), "https URL"),
         (lambda value: value["version"].update({"commit": "abc"}), "full lowercase"),
         (lambda value: value["images"][0].update({"digest": "sha256:bad"}), "immutable sha256"),
+        (
+            lambda value: value["images"][0].update(
+                {"name": "--platform=linux/amd64@sha256:unsafe"}
+            ),
+            "canonical fully qualified OCI repository",
+        ),
         (lambda value: value.update({"runtime_backend": "shell"}), "docker-engine"),
     ],
 )
@@ -96,10 +111,98 @@ def test_non_runnable_cannot_claim_trust(juice_shop: object) -> None:
         Manifest.parse(raw)
 
 
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value["trust"].update({"level": "invented"}), "trust.level"),
+        (lambda value: value.update({"adapter_status": "maybe"}), "adapter_status"),
+        (lambda value: value.update({"last_verified": "2026-02-30"}), "last_verified"),
+        (lambda value: value.update({"last_verified": "20260906"}), "last_verified"),
+    ],
+)
+def test_manifest_enum_and_date_errors_are_integrity_failures(
+    mutation: object, message: str, juice_shop: object
+) -> None:
+    raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    mutation(raw)  # type: ignore[operator]
+    with pytest.raises(IntegrityError, match=message):
+        Manifest.parse(raw)
+
+
+def test_runnable_trust_invariants_fail_closed(juice_shop: object) -> None:
+    raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    raw["trust"]["limitations"] = []
+    with pytest.raises(IntegrityError, match="provenance limitation"):
+        Manifest.parse(raw)
+
+    raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    raw["version"]["commit"] = ""
+    with pytest.raises(IntegrityError, match="pinned upstream commit"):
+        Manifest.parse(raw)
+
+    raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    raw["images"][0]["architectures"] = []
+    with pytest.raises(IntegrityError, match="architecture-qualified"):
+        Manifest.parse(raw)
+
+
 def test_runnable_cannot_omit_digest(juice_shop: object) -> None:
     raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
     raw["images"][0]["digest"] = ""
     with pytest.raises(IntegrityError, match="digest-pinned"):
+        Manifest.parse(raw)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda value: value["services"][0].update({"health_path": "//remote.example/"}),
+            "origin-relative",
+        ),
+        (
+            lambda value: value["services"][0].update({"protocol": "tcp"}),
+            "HTTP application health",
+        ),
+        (
+            lambda value: value["services"].append(copy.deepcopy(value["services"][0])),
+            "service names must be unique",
+        ),
+        (
+            lambda value: value["images"].append(
+                {
+                    "name": "registry.example.test/extra",
+                    "digest": "sha256:" + "e" * 64,
+                    "architectures": ["linux/amd64"],
+                    "role": "extra",
+                }
+            ),
+            "exactly one application",
+        ),
+        (
+            lambda value: value["services"][1].update({"internal_port": 3001}),
+            "share one internal port",
+        ),
+        (
+            lambda value: value["initialization"].update({"automatic": False}),
+            "automatic initialization",
+        ),
+        (
+            lambda value: value["persistence"].update({"required": True, "volumes": ["data"]}),
+            "reviewed volume lifecycle",
+        ),
+        (
+            lambda value: value["resources"].update({"memory_mb": 20_000}),
+            "memory_mb",
+        ),
+    ],
+)
+def test_runnable_runtime_contract_fails_closed(
+    mutation: object, message: str, juice_shop: object
+) -> None:
+    raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    mutation(raw)  # type: ignore[operator]
+    with pytest.raises(IntegrityError, match=message):
         Manifest.parse(raw)
 
 
@@ -114,6 +217,14 @@ def test_lockfile_rejects_mutable_or_unknown_content(juice_shop: object) -> None
         Lockfile.parse(raw)
 
 
+@pytest.mark.parametrize("timestamp", ["2026-02-30T00:00:00Z", "2026-09-06", "2026-09-06T00:00:00"])
+def test_lockfile_timestamp_must_be_valid_canonical_utc(timestamp: str, juice_shop: object) -> None:
+    raw = copy.deepcopy(juice_shop.lock.raw)  # type: ignore[attr-defined]
+    raw["verified_at"] = timestamp
+    with pytest.raises(IntegrityError, match="UTC ISO 8601"):
+        Lockfile.parse(raw)
+
+
 def test_catalogue_rejects_manifest_lock_mismatch(tmp_path: Path, juice_shop: object) -> None:
     manifests = tmp_path / "manifests"
     locks = tmp_path / "locks"
@@ -125,4 +236,96 @@ def test_catalogue_rejects_manifest_lock_mismatch(tmp_path: Path, juice_shop: ob
     (manifests / "juice-shop.json").write_text(json.dumps(raw_manifest), encoding="utf-8")
     (locks / "juice-shop.lock.json").write_text(json.dumps(raw_lock), encoding="utf-8")
     with pytest.raises(IntegrityError, match="manifest and lock images differ"):
+        Catalogue(tmp_path).all()
+
+
+def test_catalogue_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    manifests = tmp_path / "manifests"
+    locks = tmp_path / "locks"
+    manifests.mkdir()
+    locks.mkdir()
+    (manifests / "duplicate.json").write_text(
+        '{"schema_version":1,"schema_version":1}\n', encoding="utf-8"
+    )
+    with pytest.raises(IntegrityError, match="duplicate JSON object key"):
+        Catalogue(tmp_path).all()
+
+
+def test_catalogue_binds_filenames_hostnames_and_lock_inventory(
+    tmp_path: Path, juice_shop: object
+) -> None:
+    manifests = tmp_path / "manifests"
+    locks = tmp_path / "locks"
+    manifests.mkdir()
+    locks.mkdir()
+    raw_manifest = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    raw_lock = copy.deepcopy(juice_shop.lock.raw)  # type: ignore[attr-defined]
+    (manifests / "wrong-name.json").write_text(json.dumps(raw_manifest), encoding="utf-8")
+    (locks / "juice-shop.lock.json").write_text(json.dumps(raw_lock), encoding="utf-8")
+    with pytest.raises(IntegrityError, match="filename"):
+        Catalogue(tmp_path).all()
+
+    (manifests / "wrong-name.json").rename(manifests / "juice-shop.json")
+    (locks / "orphan.lock.json").write_text(json.dumps(raw_lock), encoding="utf-8")
+    with pytest.raises(IntegrityError, match="inventories differ"):
+        Catalogue(tmp_path).all()
+
+    (locks / "orphan.lock.json").unlink()
+    second = copy.deepcopy(raw_manifest)
+    second["id"] = "second-lab"
+    (manifests / "second-lab.json").write_text(json.dumps(second), encoding="utf-8")
+    second_lock = copy.deepcopy(raw_lock)
+    second_lock["lab_id"] = "second-lab"
+    (locks / "second-lab.lock.json").write_text(json.dumps(second_lock), encoding="utf-8")
+    with pytest.raises(IntegrityError, match="duplicate friendly hostnames"):
+        Catalogue(tmp_path).all()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("lab_version", "20.2.1", "versions differ"),
+        ("upstream_release", "v20.2.1", "versions differ"),
+        ("upstream_commit", "1" * 40, "versions differ"),
+        ("trust_evidence", ["https://example.test/different"], "trust evidence differ"),
+        ("verified_platforms", ["linux/arm64"], "verified platforms differ"),
+        ("verified_at", "2026-09-07T00:00:00Z", "verification dates differ"),
+        ("template_sha256", "sha256:" + "9" * 64, "orchestration template differs"),
+    ],
+)
+def test_runnable_manifest_lock_metadata_is_bound(
+    tmp_path: Path, juice_shop: object, field: str, value: object, message: str
+) -> None:
+    manifests = tmp_path / "manifests"
+    locks = tmp_path / "locks"
+    manifests.mkdir()
+    locks.mkdir()
+    raw_manifest = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    raw_lock = copy.deepcopy(juice_shop.lock.raw)  # type: ignore[attr-defined]
+    raw_lock[field] = value
+    (manifests / "juice-shop.json").write_text(json.dumps(raw_manifest), encoding="utf-8")
+    (locks / "juice-shop.lock.json").write_text(json.dumps(raw_lock), encoding="utf-8")
+    with pytest.raises(IntegrityError, match=message):
+        Catalogue(tmp_path).all()
+
+
+def test_vulndockyard_built_requires_build_evidence_and_ghcr(
+    tmp_path: Path, juice_shop: object
+) -> None:
+    manifests = tmp_path / "manifests"
+    locks = tmp_path / "locks"
+    manifests.mkdir()
+    locks.mkdir()
+    raw_manifest = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    raw_manifest["trust"]["level"] = "vulndockyard-built"
+    raw_lock = copy.deepcopy(juice_shop.lock.raw)  # type: ignore[attr-defined]
+    (manifests / "juice-shop.json").write_text(json.dumps(raw_manifest), encoding="utf-8")
+    (locks / "juice-shop.lock.json").write_text(json.dumps(raw_lock), encoding="utf-8")
+    with pytest.raises(IntegrityError, match="lacks source or build-recipe evidence"):
+        Catalogue(tmp_path).all()
+
+    raw_lock["source_sha256"] = "sha256:" + "2" * 64
+    raw_lock["build_recipe_revision"] = "recipes/juice-shop@1"
+    (locks / "juice-shop.lock.json").write_text(json.dumps(raw_lock), encoding="utf-8")
+    with pytest.raises(IntegrityError, match="not hosted on GHCR"):
         Catalogue(tmp_path).all()

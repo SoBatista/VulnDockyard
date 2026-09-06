@@ -112,7 +112,9 @@
       "Some OSINT challenges need user-side Internet research"
     ]
   },
-  "dangerous_capabilities": [],
+  "dangerous_capabilities": [
+    "gateway: CAP_NET_BIND_SERVICE only; required to execute the locked official Caddy binary after cap_drop=ALL"
+  ],
   "expected_functionality": [
     "Shop user interface",
     "REST APIs and challenge inventory",

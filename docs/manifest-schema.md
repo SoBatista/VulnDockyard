@@ -23,3 +23,9 @@ architectures, template/source checksums, build-recipe revision, trust evidence,
 verification timestamp, and tested platforms. Tags are discovery evidence only;
 Docker execution is always `repository@sha256:...`.
 
+For the generic controller backend, `template_sha256` is the canonical SHA-256 of
+the manifest fields that drive rendering: backend, images, services, hostname,
+health and initialization, lifecycle/reset, resource and persistence policy,
+egress, and dangerous-capability declarations. The catalogue recomputes it before
+any runnable adapter can load. Quarantined adapters may leave it empty because no
+runtime template is approved.

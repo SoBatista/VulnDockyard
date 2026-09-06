@@ -1,19 +1,45 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
 import tarfile
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
+from typing import Any
 
 import pytest
 
 import vulndockyard.provider as provider_module
 from vulndockyard.errors import IntegrityError, PolicyError
 from vulndockyard.paths import Paths
-from vulndockyard.provider import ProviderLock, VulhubProvider, load_provider_lock
+from vulndockyard.provider import ProviderLock, VulhubProvider, _NoRedirect, load_provider_lock
+
+DIGEST = "sha256:" + "d" * 64
+
+
+def reviewed_allowlist(commit: str) -> dict[str, object]:
+    return {
+        "demo/CVE-2020-0001": {
+            "provider_commit": commit,
+            "compose_sha256": "sha256:" + "c" * 64,
+            "images": [f"registry.example.test/demo@{DIGEST}"],
+            "commands": [],
+            "review": {
+                "status": "runnable",
+                "reviewed_at": "2026-09-06",
+                "reviewer": "VulnDockyard maintainers",
+                "provenance_evidence": ["https://example.test/provenance"],
+                "license_evidence": ["https://example.test/license"],
+                "architectures": ["linux/amd64"],
+                "functionality_evidence": ["identity and expected training inventory passed"],
+                "container_escape_exercise": False,
+            },
+        }
+    }
 
 
 def archive(commit: str, *, unsafe: str | None = None) -> bytes:
@@ -39,6 +65,25 @@ def archive(commit: str, *, unsafe: str | None = None) -> bytes:
     return buffer.getvalue()
 
 
+def duplicate_normalized_archive(commit: str) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+        for name in (f"vulhub-{commit}/a//b", f"vulhub-{commit}/a/b"):
+            info = tarfile.TarInfo(name)
+            info.size = 1
+            bundle.addfile(info, io.BytesIO(b"x"))
+    return buffer.getvalue()
+
+
+def unexpected_root_archive(commit: str) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+        info = tarfile.TarInfo("unexpected/file")
+        info.size = 1
+        bundle.addfile(info, io.BytesIO(b"x"))
+    return buffer.getvalue()
+
+
 class Response(io.BytesIO):
     def __enter__(self) -> Response:
         return self
@@ -56,6 +101,7 @@ def test_provider_lock_is_exact_and_official() -> None:
     lock = load_provider_lock()
     assert lock.repository == "https://github.com/vulhub/vulhub"
     assert len(lock.commit) == 40
+    assert lock.archive_url == f"https://codeload.github.com/vulhub/vulhub/tar.gz/{lock.commit}"
     assert lock.archive_sha256.startswith("sha256:")
 
 
@@ -67,14 +113,14 @@ def test_verified_sync_indexes_but_does_not_approve(
     lock = ProviderLock(
         "https://github.com/vulhub/vulhub",
         commit,
-        f"https://github.com/vulhub/vulhub/archive/{commit}.tar.gz",
+        f"https://codeload.github.com/vulhub/vulhub/tar.gz/{commit}",
         "sha256:" + hashlib.sha256(content).hexdigest(),
         "MIT",
     )
     monkeypatch.setattr(provider_module, "load_provider_lock", lambda: lock)
     monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
+        provider_module,
+        "_open_pinned_archive",
         lambda request, timeout: Response(content),
     )
     provider = VulhubProvider(xdg_paths)
@@ -98,14 +144,14 @@ def test_provider_cache_tampering_is_detected(
     lock = ProviderLock(
         "https://github.com/vulhub/vulhub",
         commit,
-        f"https://github.com/vulhub/vulhub/archive/{commit}.tar.gz",
+        f"https://codeload.github.com/vulhub/vulhub/tar.gz/{commit}",
         "sha256:" + hashlib.sha256(content).hexdigest(),
         "MIT",
     )
     monkeypatch.setattr(provider_module, "load_provider_lock", lambda: lock)
     monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
+        provider_module,
+        "_open_pinned_archive",
         lambda request, timeout: Response(content),
     )
     provider = VulhubProvider(xdg_paths)
@@ -124,20 +170,56 @@ def test_provider_rejects_checksum_and_archive_traversal(
     bad_lock = ProviderLock(
         "https://github.com/vulhub/vulhub",
         commit,
-        f"https://github.com/vulhub/vulhub/archive/{commit}.tar.gz",
+        f"https://codeload.github.com/vulhub/vulhub/tar.gz/{commit}",
         "sha256:" + "0" * 64,
         "MIT",
     )
     monkeypatch.setattr(provider_module, "load_provider_lock", lambda: bad_lock)
     monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
+        provider_module,
+        "_open_pinned_archive",
         lambda request, timeout: Response(content),
     )
     with pytest.raises(IntegrityError, match="checksum mismatch"):
         VulhubProvider(xdg_paths).sync()
     with pytest.raises(IntegrityError, match="unsafe"):
         VulhubProvider._extract(archive(commit, unsafe="../escape"), tmp_path, commit)
+    with pytest.raises(IntegrityError, match="unsafe"):
+        VulhubProvider._extract(duplicate_normalized_archive(commit), tmp_path, commit)
+    with pytest.raises(IntegrityError, match="unsafe"):
+        VulhubProvider._extract(unexpected_root_archive(commit), tmp_path, commit)
+    with pytest.raises(PolicyError, match="timeout"):
+        VulhubProvider(xdg_paths).sync(timeout=float("inf"))
+
+
+def test_provider_download_redirects_are_disabled() -> None:
+    assert (
+        _NoRedirect().redirect_request(
+            urllib.request.Request("https://github.com/"),
+            None,
+            302,
+            "Found",
+            {},
+            "http://127.0.0.1/private",
+        )
+        is None
+    )
+
+
+def test_provider_rejects_even_official_but_redirecting_archive_url(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commit = "3" * 40
+    lock = ProviderLock(
+        "https://github.com/vulhub/vulhub",
+        commit,
+        f"https://github.com/vulhub/vulhub/archive/{commit}.tar.gz",
+        "sha256:" + "4" * 64,
+        "MIT",
+    )
+    monkeypatch.setattr(provider_module, "load_provider_lock", lambda: lock)
+    with pytest.raises(IntegrityError, match="unauthorized origin"):
+        VulhubProvider(xdg_paths).sync()
 
 
 def test_provider_absent_and_malformed_cache_are_honest(xdg_paths: Paths) -> None:
@@ -161,3 +243,103 @@ def test_provider_absent_and_malformed_cache_are_honest(xdg_paths: Paths) -> Non
     )
     with pytest.raises(IntegrityError, match="malformed"):
         provider.entries()
+
+
+def test_reviewed_allowlist_contract_is_strict(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commit = "e" * 40
+    lock = ProviderLock(
+        "https://github.com/vulhub/vulhub",
+        commit,
+        f"https://codeload.github.com/vulhub/vulhub/tar.gz/{commit}",
+        "sha256:" + "a" * 64,
+        "MIT",
+    )
+    monkeypatch.setattr(provider_module, "load_provider_lock", lambda: lock)
+    provider = VulhubProvider(xdg_paths)
+
+    def validate(value: dict[str, object]) -> None:
+        monkeypatch.setattr(provider_module, "_load_resource", lambda name: value)
+        provider._allowlist()
+
+    valid = reviewed_allowlist(commit)
+    validate(valid)
+
+    def item(value: dict[str, object]) -> dict[str, Any]:
+        return value["demo/CVE-2020-0001"]  # type: ignore[return-value]
+
+    mutations: tuple[Callable[[dict[str, object]], None], ...] = (
+        lambda value: value.update({"../escape": value.pop("demo/CVE-2020-0001")}),
+        lambda value: item(value).update({"provider_commit": "f" * 40}),
+        lambda value: item(value).update({"compose_sha256": "bad"}),
+        lambda value: item(value).update({"images": []}),
+        lambda value: item(value).update({"images": ["demo:latest"]}),
+        lambda value: item(value).update({"commands": ["bad command"]}),
+        lambda value: item(value)["review"].update({"unknown": True}),
+        lambda value: item(value)["review"].update({"status": "pending"}),
+        lambda value: item(value)["review"].update({"container_escape_exercise": True}),
+        lambda value: item(value)["review"].update({"reviewed_at": "soon"}),
+        lambda value: item(value)["review"].update({"reviewed_at": "2026-02-30"}),
+        lambda value: item(value)["review"].update({"reviewer": ""}),
+        lambda value: item(value)["review"].update({"provenance_evidence": []}),
+        lambda value: item(value)["review"].update({"license_evidence": ["file:///tmp/license"]}),
+        lambda value: item(value)["review"].update({"architectures": ["linux/unknown"]}),
+        lambda value: item(value)["review"].update(
+            {"architectures": ["linux/amd64", "linux/amd64"]}
+        ),
+        lambda value: item(value)["review"].update({"functionality_evidence": []}),
+    )
+    for mutation in mutations:
+        changed = copy.deepcopy(valid)
+        mutation(changed)
+        with pytest.raises(IntegrityError, match="allowlist"):
+            validate(changed)
+
+
+def test_reviewed_compose_checksum_change_fails_closed(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "f" * 40
+    content = archive(commit)
+    VulhubProvider._extract(content, tmp_path / "extract", commit)
+    extracted = tmp_path / "extract" / f"vulhub-{commit}"
+    allowlist = reviewed_allowlist(commit)
+    monkeypatch.setattr(VulhubProvider, "_allowlist", lambda self: allowlist)
+    with pytest.raises(IntegrityError, match="checksum changed"):
+        VulhubProvider(xdg_paths)._index(extracted)
+
+
+def test_cached_index_rejects_unsafe_terminal_content() -> None:
+    value = [
+        {
+            "path": "demo/CVE-2020-0001",
+            "product": "Demo",
+            "category": "RCE",
+            "cves": ["CVE-2020-0001"],
+            "status": "blocked",
+            "reasons": ["unsafe\nterminal"],
+        }
+    ]
+    with pytest.raises(IntegrityError, match="unsafe field"):
+        VulhubProvider._parse_entries(json.dumps(value).encode())
+
+
+def test_cached_index_rejects_duplicate_json_keys() -> None:
+    with pytest.raises(IntegrityError, match="malformed"):
+        VulhubProvider._parse_entries(b'[{"path":"a","path":"b"}]')
+
+
+def test_cached_index_rejects_noncanonical_provider_path() -> None:
+    value = [
+        {
+            "path": "demo//CVE-2020-0001",
+            "product": "Demo",
+            "category": "RCE",
+            "cves": ["CVE-2020-0001"],
+            "status": "blocked",
+            "reasons": ["not reviewed"],
+        }
+    ]
+    with pytest.raises(IntegrityError, match="unsafe field"):
+        VulhubProvider._parse_entries(json.dumps(value).encode())

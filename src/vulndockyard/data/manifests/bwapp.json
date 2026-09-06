@@ -19,7 +19,7 @@
   },
   "license": {
     "spdx": "CC-BY-NC-ND-4.0",
-    "evidence_url": "https://itsecgames.com/sites/default/files/downloads/bWAPP_sample_report.pdf",
+    "evidence_url": "https://sourceforge.net/p/bwapp/code/ci/master/tree/bWAPP/credits.php",
     "redistribution": "Containerization and modified redistribution are not authorized by the documented NoDerivatives and NonCommercial terms."
   },
   "trust": {
@@ -105,4 +105,3 @@
     "https://sourceforge.net/p/bwapp/code/ci/master/tree/INSTALL.txt"
   ]
 }
-

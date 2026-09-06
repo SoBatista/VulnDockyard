@@ -1,8 +1,7 @@
 {
   "repository": "https://github.com/vulhub/vulhub",
   "commit": "aeaf65793f147f29bd50841ef77f4e9cad07ecc7",
-  "archive_url": "https://github.com/vulhub/vulhub/archive/aeaf65793f147f29bd50841ef77f4e9cad07ecc7.tar.gz",
+  "archive_url": "https://codeload.github.com/vulhub/vulhub/tar.gz/aeaf65793f147f29bd50841ef77f4e9cad07ecc7",
   "archive_sha256": "sha256:30534377de8731a6c087174dd894938eb5dcb09584c22a2f81738236bf6cb88c",
   "license": "MIT"
 }
-

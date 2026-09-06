@@ -5,6 +5,9 @@ The provider pins official `vulhub/vulhub` commit
 archive SHA-256. `provider sync vulhub` downloads into an XDG cache, verifies the
 archive, rejects unsafe tar members, parses `environments.toml` and Compose, then
 writes a separately checksummed deterministic index.
+The lock uses the exact HTTPS `codeload.github.com` commit URL; proxy use and HTTP
+redirects are disabled so retrieval cannot be redirected to a host-local or LAN
+endpoint before the archive checksum is evaluated.
 
 All entries are searchable by upstream path, CVE, product, and category. The v1
 runnable allowlist is intentionally empty. Neither a `vulhub/*` name nor Vulhub's
@@ -22,4 +25,3 @@ A future allowlist record must pin provider commit/path, Compose checksum, exact
 images, origins, licenses, architectures, commands, capability exceptions, expected
 functionality, and dated smoke evidence. Runtime uses a rendered project-owned
 template, never the cached source definition.
-

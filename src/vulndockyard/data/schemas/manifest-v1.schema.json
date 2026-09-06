@@ -54,8 +54,9 @@
       "properties": {
         "name": {
           "type": "string",
-          "minLength": 1,
-          "pattern": "^[^@\\s]+$"
+          "minLength": 3,
+          "maxLength": 255,
+          "pattern": "^(?:(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|localhost)(?::[1-9][0-9]{0,4})?/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$"
         },
         "digest": {
           "type": "string",
@@ -112,7 +113,8 @@
         },
         "health_path": {
           "type": "string",
-          "pattern": "^/"
+          "maxLength": 512,
+          "pattern": "^/(?!/)"
         },
         "identity_regex": {
           "type": "string",
@@ -327,18 +329,18 @@
       "properties": {
         "memory_mb": {
           "type": "integer",
-          "minimum": 64,
-          "maximum": 131072
+          "minimum": 128,
+          "maximum": 16384
         },
         "cpus": {
           "type": "number",
           "minimum": 0.1,
-          "maximum": 64
+          "maximum": 8
         },
         "pids": {
           "type": "integer",
           "minimum": 16,
-          "maximum": 32768
+          "maximum": 4096
         },
         "read_only_root": {
           "type": "boolean"
@@ -461,7 +463,8 @@
       "then": {
         "properties": {
           "images": {
-            "minItems": 1,
+            "minItems": 2,
+            "maxItems": 2,
             "items": {
               "allOf": [
                 {
