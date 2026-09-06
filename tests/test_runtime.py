@@ -580,6 +580,7 @@ class ReadyRuntime(Runtime):
             paths=paths,
             docker=docker,  # type: ignore[arg-type]
             temporary_port_selector=lambda excluded: 28080,
+            port_checker=lambda port: True,
         )
         self.health_calls = 0
         self.fail_health = False
@@ -663,6 +664,40 @@ def test_reference_lifecycle_is_idempotent_and_distinct(xdg_paths: Paths) -> Non
     assert value.remove(lab).state == "absent"
     assert value.remove(lab).state == "absent"
     assert docker.objects == {}
+
+
+def test_new_run_refuses_busy_loopback_port_before_docker_mutation(xdg_paths: Paths) -> None:
+    docker = FakeDocker()
+    value = ReadyRuntime(paths=xdg_paths, docker=docker)
+    value.port_checker = lambda port: False
+    lab = Catalogue().get("juice-shop")
+
+    with pytest.raises(PreflightError, match=r"port 18080.*--port"):
+        value.up(lab, host_port=18080)
+
+    assert docker.pulls == []
+    assert docker.objects == {}
+    assert value.store.load(lab.manifest.id) is None
+
+
+def test_stopped_gateway_refuses_busy_port_before_restart(xdg_paths: Paths) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    value.stop(lab)
+    starts_before = tuple(event for event in docker.events if event[0] == "start")
+    value.port_checker = lambda port: False
+
+    with pytest.raises(PreflightError, match=r"port 18080.*--port"):
+        value.up(lab, host_port=18080)
+
+    assert tuple(event for event in docker.events if event[0] == "start") == starts_before
+    state = value.store.load(lab.manifest.id)
+    assert state is not None
+    assert all(
+        not docker.objects[record.object_id]["State"]["Running"]
+        for record in state.resources
+        if record.kind == "container"
+    )
 
 
 def test_persistent_rebuild_preserves_owned_data_and_reset_replaces_it(

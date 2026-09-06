@@ -147,6 +147,7 @@ class Runtime:
         *,
         sleeper: Callable[[float], None] = time.sleep,
         temporary_port_selector: Callable[[int], int] = _temporary_loopback_port,
+        port_checker: Callable[[int], bool] | None = None,
     ) -> None:
         self.catalogue = catalogue or Catalogue()
         self.paths = paths or Paths.discover()
@@ -154,6 +155,7 @@ class Runtime:
         self.docker = docker or Docker()
         self.sleeper = sleeper
         self.temporary_port_selector = temporary_port_selector
+        self.port_checker = port_checker or port_available
         self._thread_lock = threading.RLock()
         self._lock_depth = 0
 
@@ -189,6 +191,13 @@ class Runtime:
         if lab.manifest.adapter_status is not AdapterStatus.RUNNABLE:
             raise PolicyError(
                 f"{lab.manifest.id} is {lab.manifest.adapter_status}: {lab.manifest.status_reason}"
+            )
+
+    def _require_loopback_port(self, port: int) -> None:
+        if not self.port_checker(port):
+            raise PreflightError(
+                f"loopback port {port} is already in use; stop its current listener or select "
+                "an explicit fallback with --port"
             )
 
     def _preflight_lab(self, lab: ReviewedLab) -> str:
@@ -701,6 +710,7 @@ class Runtime:
         created_at: str | None = None,
         on_checkpoint: Callable[[RunState], None] | None = None,
     ) -> RunState:
+        self._require_loopback_port(host_port)
         gateway = _gateway_image(lab)
         memory, cpus, pids, read_only = _resource_limits(lab)
         storage = lab.manifest.ephemeral_storage
@@ -1011,8 +1021,11 @@ class Runtime:
                             if self.docker._labels(record.kind, inspection).get(ROLE) == "gateway"
                         )
                         self.docker.stop(gateway_record)
+                    self._require_loopback_port(existing.host_port)
                     self._reseed_and_start(lab, existing, inspections)
                 else:
+                    if running_by_role.get("gateway") is False:
+                        self._require_loopback_port(existing.host_port)
                     for record, inspection in container_pairs:
                         if not self._running(inspection):
                             self.docker.start(record)
@@ -1028,6 +1041,7 @@ class Runtime:
         gateway = _gateway_image(lab)
         selected_reference = unsafe_image or app.reference
         trusted = unsafe_image is None
+        self._require_loopback_port(host_port)
         # Pull every reviewed support image; an unsafe app never lends its run reviewed trust.
         self.docker.pull(selected_reference)
         self.docker.pull(gateway.reference)
@@ -1420,6 +1434,7 @@ class Runtime:
         if self.docker.exists(old_gateway.kind, old_gateway.object_id):
             restored_gateway = old_gateway
         else:
+            self._require_loopback_port(previous.host_port)
             restored_gateway = self.docker.create_gateway(
                 name=old_gateway.name,
                 image=previous.gateway_reference,
@@ -1456,6 +1471,11 @@ class Runtime:
         application_should_run = "application" in journal.running_roles
         gateway_should_run = "gateway" in journal.running_roles
         if application_should_run and not self._running(application[1]):
+            if gateway_should_run and self._running(gateway[1]):
+                self.docker.stop(gateway[0])
+                inspections = self._validate_state(previous, enforce_policy=True)
+            if gateway_should_run:
+                self._require_loopback_port(previous.host_port)
 
             def checkpoint_previous(current: RunState) -> None:
                 nonlocal journal, previous
@@ -1471,6 +1491,7 @@ class Runtime:
                 on_checkpoint=checkpoint_previous,
             )
         elif gateway_should_run and not self._running(gateway[1]):
+            self._require_loopback_port(previous.host_port)
             self.docker.start(gateway[0])
         final_inspections = self._validate_state(previous, enforce_policy=True)
         if not self._complete_layout(lab, previous, final_inspections):
@@ -1774,6 +1795,7 @@ class Runtime:
                     for record in candidate.resources
                     if record.kind == "network" and record.name.endswith("-net")
                 )
+                self._require_loopback_port(previous.host_port)
                 final_gateway = self.docker.create_gateway(
                     name=temporary_gateway.name,
                     image=_gateway_image(lab).reference,
@@ -2066,6 +2088,7 @@ class Runtime:
             self.store.save(state)
 
         try:
+            self._require_loopback_port(state.host_port)
             network = self.docker.create_network(f"{prefix}-net", ownership, internal=True)
             checkpoint(network)
             ingress = self.docker.create_network(f"{prefix}-ingress", ownership, internal=False)
