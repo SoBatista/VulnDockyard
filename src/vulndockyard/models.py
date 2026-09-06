@@ -529,6 +529,10 @@ class Manifest:
         if len(persistence_volumes) != len(set(persistence_volumes)):
             raise IntegrityError("persistence.volumes must be unique")
         if status is AdapterStatus.RUNNABLE:
+            if ephemeral_storage.uid == 0 or ephemeral_storage.gid == 0:
+                raise IntegrityError(
+                    "runnable application storage uid and gid must both be non-zero"
+                )
             scratch_names = {
                 mount.name for mount in ephemeral_storage.seeded + ephemeral_storage.empty
             }
@@ -536,15 +540,10 @@ class Manifest:
                 raise IntegrityError(
                     "runnable persistence.volumes must exactly identify declared writable storage"
                 )
-            if persistence["required"]:
-                if not scratch_names:
-                    raise IntegrityError(
-                        "persistent runnable adapters require at least one declared writable mount"
-                    )
-                if (ephemeral_storage.uid, ephemeral_storage.gid) != (0, 0):
-                    raise IntegrityError(
-                        "persistent runnable adapters currently require storage uid and gid 0"
-                    )
+            if persistence["required"] and not scratch_names:
+                raise IntegrityError(
+                    "persistent runnable adapters require at least one declared writable mount"
+                )
 
         verification = _mapping(data["verification"], "verification")
         _require_exact(verification, {"status", "platforms", "evidence"}, "verification")

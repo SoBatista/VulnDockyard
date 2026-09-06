@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import http.client
 import json
 import os
@@ -10,6 +11,7 @@ import pytest
 from vulndockyard.catalogue import Catalogue, ReviewedLab, identity, template_identity
 from vulndockyard.docker import GATEWAY_MODE_IPV4, ROLE, Docker
 from vulndockyard.errors import PreflightError
+from vulndockyard.models import Manifest
 from vulndockyard.paths import Paths
 from vulndockyard.runtime import Runtime, port_available
 
@@ -96,6 +98,14 @@ def _reviewed_prior(candidate: ReviewedLab, root: Path) -> ReviewedLab:
     assert template_identity(prior.manifest) == template_identity(candidate.manifest)
     assert prior.lock.template_sha256 == candidate.lock.template_sha256
     return prior
+
+
+def _persistent_review(candidate: ReviewedLab) -> ReviewedLab:
+    raw = json.loads(json.dumps(candidate.manifest.raw))
+    raw["persistence"]["required"] = True
+    manifest = Manifest.parse(raw)
+    lock = dataclasses.replace(candidate.lock, template_sha256=template_identity(manifest))
+    return ReviewedLab(manifest, lock, identity(raw))
 
 
 def test_juice_shop_complete_behavioral_equivalence(
@@ -266,4 +276,74 @@ def test_juice_shop_complete_behavioral_equivalence(
     assert runtime.store.load_update(lab.manifest.id) is None
     assert port_available(port)
     assert port_available(update_port)
+    assert all(not values for values in runtime.residual_audit().values())
+
+
+def test_juice_shop_persistent_storage_runs_nonroot_and_resets_exact_data(
+    xdg_paths: Paths,
+) -> None:
+    port = int(os.environ.get("VDY_PERSISTENT_SMOKE_PORT", "18091"))
+    assert port_available(port), f"required explicit persistent smoke port is busy: {port}"
+    lab = _persistent_review(Catalogue().get("juice-shop"))
+    docker = Docker()
+    runtime = Runtime(paths=xdg_paths, docker=docker)
+    assert all(not values for values in runtime.residual_audit().values())
+    try:
+        started = runtime.up(lab, host_port=port)
+        assert started.state == "running"
+        assert started.trusted_run and started.lock_match
+        state = runtime.store.load(lab.manifest.id)
+        assert state is not None and state.phase == "steady"
+        assert state.runtime_policy is not None and state.runtime_policy.persistence_required
+        inspections = runtime._validate_state(state, lab=lab, enforce_policy=True)
+        resources = tuple(zip(state.resources, inspections, strict=True))
+        application = next(
+            inspection
+            for record, inspection in resources
+            if record.kind == "container"
+            and docker._labels(record.kind, inspection)[ROLE] == "application"
+        )
+        assert application["Config"]["User"] == "65532:65532"
+        assert not any(
+            record.kind == "container" and docker._labels(record.kind, inspection)[ROLE] == "seeder"
+            for record, inspection in resources
+        )
+        original_volumes = tuple(record for record in state.resources if record.kind == "volume")
+        assert len(original_volumes) == len(
+            lab.manifest.ephemeral_storage.seeded + lab.manifest.ephemeral_storage.empty
+        )
+
+        account = f"vdy-persistent-{started.run_id[:12]}@example.test"
+        _register_and_login(port, account)
+        rebuilt = runtime.rebuild(lab)
+        assert rebuilt.run_id == started.run_id
+        rebuilt_state = runtime.store.load(lab.manifest.id)
+        assert rebuilt_state is not None and rebuilt_state.phase == "steady"
+        assert tuple(
+            record.object_id for record in rebuilt_state.resources if record.kind == "volume"
+        ) == tuple(record.object_id for record in original_volumes)
+        _register_and_login(port, f"second-{account}")
+        login_status, login_body = _request(
+            port,
+            "/rest/user/login",
+            method="POST",
+            payload={"email": account, "password": "Vdy-Smoke-1!"},
+        )
+        assert login_status == 200 and b"authentication" in login_body
+
+        reset = runtime.reset(lab)
+        assert reset.run_id != rebuilt.run_id
+        assert all(not docker.exists(record.kind, record.object_id) for record in original_volumes)
+        login_status, _ = _request(
+            port,
+            "/rest/user/login",
+            method="POST",
+            payload={"email": account, "password": "Vdy-Smoke-1!"},
+        )
+        assert login_status in {401, 403}
+        _assert_training_functionality(port)
+    finally:
+        runtime.remove(lab)
+    assert runtime.store.load(lab.manifest.id) is None
+    assert port_available(port)
     assert all(not values for values in runtime.residual_audit().values())

@@ -170,8 +170,8 @@ class RunState:
             raise ValueError("gateway reference and upstream port must be recorded together")
         if runtime_policy is not None and gateway_reference is None:
             raise ValueError("runtime policy requires a complete gateway snapshot")
-        if phase not in {"steady", "rebuild"}:
-            raise ValueError("run state phase must be steady or rebuild")
+        if phase not in {"provisioning", "steady", "rebuild"}:
+            raise ValueError("run state phase must be provisioning, steady, or rebuild")
         if phase == "rebuild" and (
             runtime_policy is None or not runtime_policy.persistence_required
         ):
@@ -305,7 +305,7 @@ class RunState:
                 raise IntegrityError("run state health services differ from its gateway snapshot")
         if schema_version == 4:
             phase = data["phase"]
-            if phase not in {"steady", "rebuild"}:
+            if phase not in {"provisioning", "steady", "rebuild"}:
                 raise IntegrityError("run state phase is invalid")
             if phase == "rebuild" and (
                 runtime_policy is None or not runtime_policy.persistence_required
@@ -448,8 +448,14 @@ class UpdateJournal:
             or candidate.runtime_policy is None
         ):
             raise IntegrityError("update journal lacks a trusted rollback snapshot")
-        if previous.phase != "steady" or candidate.phase != "steady":
-            raise IntegrityError("update journal requires steady run states")
+        if previous.phase != "steady" or (
+            candidate.phase != "steady"
+            and not (phase == "staged" and candidate.phase == "provisioning")
+        ):
+            raise IntegrityError(
+                "update journal requires a steady prior run and a steady or staged "
+                "provisioning candidate"
+            )
         if phase not in {"staged", "cutover", "ready"}:
             raise IntegrityError("update journal phase is invalid")
         if (

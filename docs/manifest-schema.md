@@ -14,7 +14,8 @@ provided for editors and external tooling; tests keep its required fields aligne
 with the parser.
 
 `ephemeral_storage` declares every writable mount needed by a read-only
-application root. `uid` and `gid` are numeric ownership IDs. `seeded` mounts are
+application root. `uid` and `gid` are the non-root numeric identity used by the
+application and the ownership applied to its writable data. `seeded` mounts are
 initialized from the corresponding directory in the locked application image;
 `empty` mounts intentionally begin blank. Every mount is exactly
 `{name, container_path, size_mb}`. Names and container paths are unique across
@@ -32,15 +33,17 @@ application data: rebuild must preserve it, while reset must discard and
 reinitialize only those exactly owned declared volumes. Mixed persistent and
 disposable writable paths are not part of manifest v1.
 
-The current persistent-volume contract is deliberately narrow. A runnable
-persistent adapter must declare at least one writable mount, its
+The persistent-volume contract is deliberately narrow. Every runnable adapter
+uses non-zero application UID and GID values. A persistent adapter must declare
+at least one writable mount, and its
 `persistence.volumes` set must exactly equal the names across
-`ephemeral_storage.seeded` and `ephemeral_storage.empty`, and storage UID/GID must
-both be zero. These constraints let the Docker backend fail closed rather than
-silently creating ordinary named volumes that a declared non-root identity
-cannot initialize. Quarantined adapters may retain incomplete persistence
-metadata while their runtime layout is researched; runnable-only constraints do
-not make that catalogue metadata executable.
+`ephemeral_storage.seeded` and `ephemeral_storage.empty`. The Docker backend uses
+a transient networkless initializer as UID 0 with only `CAP_CHOWN`; it may write
+only the exact owned volumes, recursively applies the declared non-root ownership
+without following symlinks, and is removed before the application runs. The
+application itself never inherits initializer privilege. Quarantined adapters
+may retain incomplete persistence metadata while their runtime layout is researched;
+runnable-only constraints do not make that catalogue metadata executable.
 
 Trust levels are `upstream-signed`, `upstream-pinned`, `vulndockyard-built`, and
 `quarantined`. Digest pinning is mandatory for runnable images but proves only

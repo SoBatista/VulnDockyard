@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import dataclasses
 import io
 import json
@@ -10,7 +11,7 @@ from typing import Any, Self, cast
 import pytest
 
 import vulndockyard.cli as cli
-from vulndockyard.catalogue import Catalogue, ReviewedLab
+from vulndockyard.catalogue import Catalogue, ReviewedLab, identity, template_identity
 from vulndockyard.docker import (
     GATEWAY_MODE_IPV4,
     LAB,
@@ -24,9 +25,10 @@ from vulndockyard.docker import (
     expected_resource_role,
 )
 from vulndockyard.errors import IntegrityError, PolicyError, PreflightError
+from vulndockyard.models import Manifest
 from vulndockyard.paths import Paths
 from vulndockyard.process import Result
-from vulndockyard.runtime import Runtime, _NoRedirect
+from vulndockyard.runtime import Runtime, _NoRedirect, _runtime_policy
 from vulndockyard.state import ResourceRecord, RunState, RuntimePolicySnapshot, UpdateJournal
 
 
@@ -48,6 +50,7 @@ class FakeDocker:
         self.application_exits = False
         self.engine_version = "28.0.0"
         self.fail_exists_for: set[str] = set()
+        self.seeder_specs: list[dict[str, object]] = []
 
     def _id(self) -> str:
         self.create_count += 1
@@ -265,14 +268,22 @@ class FakeDocker:
             raise PreflightError("synthetic seeder failure")
         object_id = self._id()
         owner: Ownership = values["ownership"]
-        payload = Docker.seeder_payload(values["seeded_mounts"])
+        empty_mounts = values.get("empty_mounts", ())
+        persistent = values.get("persistent", False)
+        payload = Docker.seeder_payload(
+            values["seeded_mounts"],
+            empty_mounts=empty_mounts,
+            uid=values["uid"],
+            gid=values["gid"],
+            persistent=persistent,
+        )
         self.objects[object_id] = {
             "Id": object_id,
             "Name": values["name"],
             "Config": {
                 "Labels": self._label_map(owner, "seeder"),
                 "Image": values["image"],
-                "User": f"{values['uid']}:{values['gid']}",
+                "User": "0:0" if persistent else f"{values['uid']}:{values['gid']}",
                 "Entrypoint": ["/nodejs/bin/node"],
                 "Cmd": ["-e", SEED_SCRIPT, payload],
             },
@@ -287,7 +298,7 @@ class FakeDocker:
                 "IpcMode": "private",
                 "UsernsMode": "",
                 "CapDrop": ["ALL"],
-                "CapAdd": None,
+                "CapAdd": ["CHOWN"] if persistent else None,
                 "SecurityOpt": ["no-new-privileges=true"],
                 "Devices": [],
                 "DeviceRequests": None,
@@ -312,12 +323,22 @@ class FakeDocker:
                     "Destination": f"/vdy-seed/{mount.name}",
                     "RW": True,
                 }
-                for volume, mount in values["seeded_mounts"]
+                for volume, mount in (*values["seeded_mounts"], *empty_mounts)
             ],
             "NetworkSettings": {"Networks": {"none": {"NetworkID": "", "EndpointID": ""}}},
             "State": {"Running": False, "Status": "created"},
         }
         self.events.append(("create-seeder", values["image"]))
+        self.seeder_specs.append(
+            {
+                "persistent": persistent,
+                "user": "0:0" if persistent else f"{values['uid']}:{values['gid']}",
+                "cap_add": ("CHOWN",) if persistent else (),
+                "mounts": tuple(
+                    mount.name for _, mount in (*values["seeded_mounts"], *empty_mounts)
+                ),
+            }
+        )
         return ResourceRecord("container", values["name"], object_id)
 
     @staticmethod
@@ -625,14 +646,11 @@ def runtime(paths: Paths) -> tuple[ReadyRuntime, FakeDocker, ReviewedLab]:
 
 
 def persistent_review(lab: ReviewedLab) -> ReviewedLab:
-    storage = dataclasses.replace(lab.manifest.ephemeral_storage, uid=0, gid=0)
-    manifest = dataclasses.replace(
-        lab.manifest,
-        ephemeral_storage=storage,
-        persistence_required=True,
-        persistence_volumes=tuple(mount.name for mount in storage.seeded + storage.empty),
-    )
-    return dataclasses.replace(lab, manifest=manifest)
+    raw = copy.deepcopy(lab.manifest.raw)
+    raw["persistence"]["required"] = True
+    manifest = Manifest.parse(raw)
+    lock = dataclasses.replace(lab.lock, template_sha256=template_identity(manifest))
+    return ReviewedLab(manifest, lock, identity(raw))
 
 
 def preserve_as_previous(value: ReadyRuntime, docker: FakeDocker, lab: ReviewedLab) -> RunState:
@@ -724,6 +742,18 @@ def test_persistent_rebuild_preserves_owned_data_and_reset_replaces_it(
     started = value.up(lab, host_port=18080)
     initial = value.store.load(lab.manifest.id)
     assert initial is not None and initial.phase == "steady"
+    application = next(record for record in initial.resources if record.name.endswith("-app"))
+    assert docker.objects[application.object_id]["Config"]["User"] == "65532:65532"
+    assert docker.seeder_specs[-1] == {
+        "persistent": True,
+        "user": "0:0",
+        "cap_add": ("CHOWN",),
+        "mounts": tuple(
+            mount.name
+            for mount in lab.manifest.ephemeral_storage.seeded
+            + lab.manifest.ephemeral_storage.empty
+        ),
+    }
     initial_volumes = tuple(record for record in initial.resources if record.kind == "volume")
     assert len(initial_volumes) == len(
         lab.manifest.ephemeral_storage.seeded + lab.manifest.ephemeral_storage.empty
@@ -2063,6 +2093,78 @@ def test_next_start_recovers_exact_owned_partial_checkpoint(xdg_paths: Paths) ->
     assert recovered.state == "running"
     assert recovered.run_id != ownership.run_id
     assert partial.object_id in docker.removed
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_state"),
+    (
+        ("up", "running"),
+        ("restart", "running"),
+        ("rebuild", "running"),
+        ("reset", "running"),
+        ("stop", "absent"),
+        ("remove", "absent"),
+        ("purge", "absent"),
+    ),
+)
+def test_interrupted_persistent_provisioning_cleans_exact_partial_resources(
+    xdg_paths: Paths, operation: str, expected_state: str
+) -> None:
+    value, docker, packaged = runtime(xdg_paths)
+    lab = persistent_review(packaged)
+    owner = Ownership(
+        lab.manifest.id,
+        lab.manifest_identity,
+        "a" * 32,
+        "2026-09-06T00:00:00Z",
+        True,
+    )
+    internal = docker.create_network("vdy-juice-shop-aaaaaaaaaaaa-net", owner, internal=True)
+    ingress = docker.create_network("vdy-juice-shop-aaaaaaaaaaaa-ingress", owner, internal=False)
+    mount = lab.manifest.ephemeral_storage.seeded[0]
+    volume = docker.create_persistent_volume(
+        name=f"vdy-juice-shop-aaaaaaaaaaaa-volume-{mount.name}", ownership=owner
+    )
+    docker.objects[volume.object_id]["TestData"]["partial"] = True
+    interrupted = RunState.create(
+        lab_id=lab.manifest.id,
+        run_id=owner.run_id,
+        manifest_identity=lab.manifest_identity,
+        host_port=18080,
+        trusted=True,
+        requested_reference=lab.manifest.images[0].reference,
+        resolved_digest=lab.manifest.images[0].digest,
+        resources=(internal, ingress, volume),
+        gateway_reference=lab.manifest.images[1].reference,
+        upstream_port=lab.manifest.services[0].internal_port,
+        runtime_policy=_runtime_policy(lab),
+        created_at=owner.created_at,
+        phase="provisioning",
+    )
+    value.store.save(interrupted)
+
+    if operation == "up":
+        events_before_observation = tuple(docker.events)
+        with pytest.raises(PolicyError, match="interrupted provisioning"):
+            value.status(lab)
+        assert tuple(docker.events) == events_before_observation
+
+    result = value.up(lab, host_port=18080) if operation == "up" else getattr(value, operation)(lab)
+
+    assert result.state == expected_state
+    assert {internal.object_id, ingress.object_id, volume.object_id}.issubset(docker.removed)
+    assert all(
+        inspection.get("TestData", {}).get("partial") is not True
+        for inspection in docker.objects.values()
+    )
+    if expected_state == "running":
+        recovered = value.store.load(lab.manifest.id)
+        assert recovered is not None
+        assert recovered.phase == "steady"
+        assert recovered.run_id != owner.run_id
+        assert recovered.host_port == 18080
+        assert value.remove(lab).state == "absent"
+    assert docker.objects == {}
 
 
 def test_next_start_adopts_resource_created_before_its_checkpoint(xdg_paths: Paths) -> None:

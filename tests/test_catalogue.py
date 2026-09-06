@@ -105,16 +105,17 @@ def test_juice_shop_declares_only_bounded_owned_ephemeral_storage() -> None:
     )
 
 
-def test_runnable_persistent_storage_requires_an_exact_root_owned_mount_set(
+def test_runnable_persistent_storage_requires_an_exact_nonroot_owned_mount_set(
     juice_shop: object,
 ) -> None:
     raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
-    raw["ephemeral_storage"].update({"uid": 0, "gid": 0})
     raw["persistence"]["required"] = True
 
     manifest = Manifest.parse(raw)
 
     assert manifest.persistence_required is True
+    assert manifest.ephemeral_storage.uid > 0
+    assert manifest.ephemeral_storage.gid > 0
     assert manifest.persistence_volumes == tuple(raw["persistence"]["volumes"])
 
 
@@ -122,22 +123,19 @@ def test_runnable_persistent_storage_requires_an_exact_root_owned_mount_set(
     ("mutation", "message"),
     [
         (
-            lambda value: (
-                value["ephemeral_storage"].update({"uid": 0, "gid": 0}),
-                value["persistence"].update({"required": True, "volumes": ["data"]}),
-            ),
+            lambda value: (value["persistence"].update({"required": True, "volumes": ["data"]}),),
             "exactly identify declared writable storage",
         ),
         (
             lambda value: (
-                value["ephemeral_storage"].update({"uid": 0, "gid": 0, "seeded": [], "empty": []}),
+                value["ephemeral_storage"].update({"seeded": [], "empty": []}),
                 value["persistence"].update({"required": True, "volumes": []}),
             ),
             "at least one declared writable mount",
         ),
         (
-            lambda value: value["persistence"].update({"required": True}),
-            "storage uid and gid 0",
+            lambda value: value["ephemeral_storage"].update({"uid": 0, "gid": 0}),
+            "storage uid and gid must both be non-zero",
         ),
     ],
 )

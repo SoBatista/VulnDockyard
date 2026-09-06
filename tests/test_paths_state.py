@@ -377,6 +377,26 @@ def test_rebuild_phase_requires_a_complete_persistent_snapshot() -> None:
         RunState.parse(unexpected_volume)
 
 
+def test_provisioning_phase_round_trips_without_rebuild_volume_constraints() -> None:
+    provisioning = RunState.create(
+        lab_id="juice-shop",
+        run_id="a" * 32,
+        manifest_identity="b" * 64,
+        host_port=80,
+        trusted=True,
+        requested_reference="registry.example.test/app@sha256:" + "c" * 64,
+        resolved_digest="sha256:" + "c" * 64,
+        resources=(),
+        gateway_reference="registry.example.test/gateway@sha256:" + "3" * 64,
+        upstream_port=3000,
+        runtime_policy=persistent_policy(),
+        created_at="2026-09-06T00:00:00Z",
+        phase="provisioning",
+    )
+
+    assert RunState.parse(json.loads(json.dumps(provisioning.serializable()))) == provisioning
+
+
 def test_update_journal_rejects_nonsteady_run_states() -> None:
     rebuild_policy = persistent_policy()
     previous = RunState.create(
@@ -420,8 +440,47 @@ def test_update_journal_rejects_nonsteady_run_states() -> None:
         ("application", "gateway"),
         28080,
     )
-    with pytest.raises(IntegrityError, match="requires steady run states"):
+    with pytest.raises(IntegrityError, match="requires a steady prior run"):
         UpdateJournal.parse(json.loads(json.dumps(journal.serializable())))
+
+
+def test_staged_update_journal_accepts_only_a_provisioning_candidate() -> None:
+    previous = RunState.create(
+        lab_id="juice-shop",
+        run_id="a" * 32,
+        manifest_identity="b" * 64,
+        host_port=80,
+        trusted=True,
+        requested_reference="registry.example.test/app@sha256:" + "c" * 64,
+        resolved_digest="sha256:" + "c" * 64,
+        resources=(),
+        gateway_reference="registry.example.test/gateway@sha256:" + "3" * 64,
+        upstream_port=3000,
+        runtime_policy=policy(),
+    )
+    candidate = dataclasses.replace(
+        previous,
+        run_id="d" * 32,
+        manifest_identity="e" * 64,
+        host_port=28080,
+        phase="provisioning",
+    )
+    staged = UpdateJournal(
+        1,
+        "juice-shop",
+        "staged",
+        previous,
+        candidate,
+        ("application", "gateway"),
+        28080,
+    )
+
+    assert UpdateJournal.parse(json.loads(json.dumps(staged.serializable()))) == staged
+    ready = dataclasses.replace(
+        staged, phase="ready", candidate=dataclasses.replace(candidate, host_port=80)
+    )
+    with pytest.raises(IntegrityError, match="staged provisioning candidate"):
+        UpdateJournal.parse(json.loads(json.dumps(ready.serializable())))
 
 
 def test_state_fails_closed_on_unknown_data_and_symlink(xdg_paths: Paths, tmp_path: Path) -> None:

@@ -561,6 +561,16 @@
                 "const": true
               }
             }
+          },
+          "ephemeral_storage": {
+            "properties": {
+              "uid": {
+                "minimum": 1
+              },
+              "gid": {
+                "minimum": 1
+              }
+            }
           }
         }
       }
@@ -582,16 +592,6 @@
       },
       "then": {
         "properties": {
-          "ephemeral_storage": {
-            "properties": {
-              "uid": {
-                "const": 0
-              },
-              "gid": {
-                "const": 0
-              }
-            }
-          },
           "persistence": {
             "properties": {
               "volumes": {

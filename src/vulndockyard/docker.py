@@ -45,10 +45,23 @@ SEED_ROOT = "/vdy-seed"
 SEED_READY_MARKER = "VULNDOCKYARD_SEED_READY_V1"
 SEED_SCRIPT = (
     'const fs=require("fs");'
+    'const path=require("path");'
     'if(typeof fs.cpSync!=="function"){throw new Error("fs.cpSync unavailable");}'
-    "const mounts=JSON.parse(process.argv[1]);"
+    "const request=JSON.parse(process.argv[1]);"
+    "const mounts=Array.isArray(request)?request:request.mounts;"
+    "const ownership=Array.isArray(request)?null:request.ownership;"
+    "const own=(target)=>{"
+    "const entry=fs.lstatSync(target);"
+    "if(entry.isDirectory()){"
+    "for(const name of fs.readdirSync(target)){own(path.join(target,name));}"
+    "}"
+    "fs.lchownSync(target,ownership.uid,ownership.gid);"
+    "};"
     "for(const mount of mounts){"
+    "if(mount.seed!==false){"
     "fs.cpSync(mount.source,mount.target,{recursive:true,force:false,errorOnExist:true});"
+    "}"
+    "if(ownership!==null){own(mount.target);}"
     "}"
     f'process.stdout.write("{SEED_READY_MARKER}\\n");'
     "setInterval(()=>{},2147483647);"
@@ -503,6 +516,8 @@ class Docker:
         parse_image_reference(image)
         if not read_only:
             raise PolicyError("runnable application root filesystem must be read-only")
+        if storage_uid == 0 or storage_gid == 0:
+            raise PolicyError("runnable application requires a non-root UID and GID")
         self._validate_ephemeral_mounts(
             seeded_mounts=seeded_mounts,
             empty_mounts=empty_mounts,
@@ -599,6 +614,8 @@ class Docker:
         storage_uid: int,
         storage_gid: int,
     ) -> None:
+        if storage_uid == 0 or storage_gid == 0:
+            raise PolicyError("runnable application requires a non-root UID and GID")
         cls._validate_ephemeral_mounts(
             seeded_mounts=seeded_mounts,
             empty_mounts=empty_mounts,
@@ -916,14 +933,27 @@ class Docker:
         seeded_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...],
         uid: int,
         gid: int,
+        empty_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...] = (),
+        persistent: bool = False,
     ) -> ResourceRecord:
         parse_image_reference(image)
-        if not seeded_mounts:
+        volume_mounts = (*seeded_mounts, *empty_mounts)
+        if not volume_mounts:
             raise IntegrityError("a storage seeder requires at least one reviewed mount")
+        if persistent and (uid == 0 or gid == 0):
+            raise PolicyError("persistent storage requires a non-root application UID and GID")
+        if not persistent and empty_mounts:
+            raise IntegrityError("ephemeral storage seeder cannot initialize empty mounts")
         self._validate_ephemeral_mounts(
-            seeded_mounts=seeded_mounts, empty_mounts=(), uid=uid, gid=gid
+            seeded_mounts=volume_mounts, empty_mounts=(), uid=uid, gid=gid
         )
-        payload = self.seeder_payload(seeded_mounts)
+        payload = self.seeder_payload(
+            seeded_mounts,
+            empty_mounts=empty_mounts,
+            uid=uid,
+            gid=gid,
+            persistent=persistent,
+        )
         args = [
             "container",
             "create",
@@ -942,7 +972,7 @@ class Docker:
             "--log-opt",
             "compress=true",
             "--user",
-            f"{uid}:{gid}",
+            "0:0" if persistent else f"{uid}:{gid}",
             "--read-only",
             "--security-opt",
             "no-new-privileges=true",
@@ -957,7 +987,9 @@ class Docker:
             "--pids-limit",
             "64",
         ]
-        for volume, mount in seeded_mounts:
+        if persistent:
+            args.extend(("--cap-add", "CHOWN"))
+        for volume, mount in volume_mounts:
             args.extend(
                 (
                     "--mount",
@@ -977,8 +1009,10 @@ class Docker:
                 inspection,
                 image=image,
                 seeded_mounts=seeded_mounts,
+                empty_mounts=empty_mounts,
                 uid=uid,
                 gid=gid,
+                persistent=persistent,
             )
         except (IntegrityError, PolicyError):
             self.remove(record)
@@ -988,15 +1022,25 @@ class Docker:
     @staticmethod
     def seeder_payload(
         seeded_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...],
+        *,
+        empty_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...] = (),
+        uid: int = 0,
+        gid: int = 0,
+        persistent: bool = False,
     ) -> str:
-        return json.dumps(
-            [
-                {"source": mount.container_path, "target": f"{SEED_ROOT}/{mount.name}"}
-                for _, mount in seeded_mounts
-            ],
-            sort_keys=True,
-            separators=(",", ":"),
+        mounts = [
+            {
+                "source": mount.container_path,
+                "target": f"{SEED_ROOT}/{mount.name}",
+                **({"seed": seed} if persistent else {}),
+            }
+            for seed, values in ((True, seeded_mounts), (False, empty_mounts))
+            for _, mount in values
+        ]
+        value: object = (
+            {"mounts": mounts, "ownership": {"gid": gid, "uid": uid}} if persistent else mounts
         )
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
     @classmethod
     def validate_seeder_policy(
@@ -1007,14 +1051,29 @@ class Docker:
         seeded_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...],
         uid: int,
         gid: int,
+        empty_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...] = (),
+        persistent: bool = False,
     ) -> None:
+        volume_mounts = (*seeded_mounts, *empty_mounts)
+        if not volume_mounts:
+            raise IntegrityError("a storage seeder requires at least one reviewed mount")
+        if persistent and (uid == 0 or gid == 0):
+            raise PolicyError("persistent storage requires a non-root application UID and GID")
+        if not persistent and empty_mounts:
+            raise IntegrityError("ephemeral storage seeder cannot initialize empty mounts")
         cls._validate_ephemeral_mounts(
-            seeded_mounts=seeded_mounts, empty_mounts=(), uid=uid, gid=gid
+            seeded_mounts=volume_mounts, empty_mounts=(), uid=uid, gid=gid
         )
         config = inspection.get("Config")
         host = inspection.get("HostConfig")
         mounts = inspection.get("Mounts")
-        payload = cls.seeder_payload(seeded_mounts)
+        payload = cls.seeder_payload(
+            seeded_mounts,
+            empty_mounts=empty_mounts,
+            uid=uid,
+            gid=gid,
+            persistent=persistent,
+        )
         if (
             not isinstance(config, dict)
             or not isinstance(host, dict)
@@ -1023,7 +1082,7 @@ class Docker:
             raise IntegrityError("Docker storage seeder inspection is malformed")
         if (
             config.get("Image") != image
-            or config.get("User") != f"{uid}:{gid}"
+            or config.get("User") != ("0:0" if persistent else f"{uid}:{gid}")
             or config.get("Entrypoint") != ["/nodejs/bin/node"]
             or config.get("Cmd") != ["-e", SEED_SCRIPT, payload]
         ):
@@ -1072,10 +1131,14 @@ class Docker:
             host.get("PidMode") != ""
             or host.get("IpcMode") != "private"
             or host.get("UsernsMode") != ""
-            or host.get("CapDrop") != ["ALL"]
-            or host.get("CapAdd") not in (None, [])
         ):
-            raise PolicyError("Docker storage seeder has unsafe namespaces or capabilities")
+            raise PolicyError("Docker storage seeder has unsafe namespaces")
+        cap_add = host.get("CapAdd")
+        actual_cap_add = () if cap_add in (None, []) else canonical_capabilities(cap_add)
+        if canonical_capabilities(host.get("CapDrop")) != ("ALL",) or actual_cap_add != (
+            ("CHOWN",) if persistent else ()
+        ):
+            raise PolicyError("Docker storage seeder has unsafe capabilities")
         if (
             host.get("SecurityOpt") != ["no-new-privileges=true"]
             or host.get("Devices") not in (None, [])
@@ -1097,7 +1160,7 @@ class Docker:
         ):
             raise PolicyError("Docker storage seeder resource policy differs from reviewed values")
         expected_mounts = {
-            (volume.name, f"{SEED_ROOT}/{mount.name}", True) for volume, mount in seeded_mounts
+            (volume.name, f"{SEED_ROOT}/{mount.name}", True) for volume, mount in volume_mounts
         }
         actual_mounts: set[tuple[str, str, bool]] = set()
         for mount in mounts:

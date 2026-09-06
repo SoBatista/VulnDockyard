@@ -734,6 +734,7 @@ class Runtime:
                 upstream_port=lab.manifest.services[0].internal_port,
                 runtime_policy=_runtime_policy(lab),
                 created_at=created_at,
+                phase="provisioning",
             )
 
         def checkpoint() -> RunState:
@@ -754,6 +755,7 @@ class Runtime:
             checkpoint()
             volume_mounts: list[tuple[ResourceRecord, EphemeralMount]] = []
             seeded_mounts: list[tuple[ResourceRecord, EphemeralMount]] = []
+            empty_volume_mounts: list[tuple[ResourceRecord, EphemeralMount]] = []
             named_storage = (
                 storage.seeded + storage.empty
                 if lab.manifest.persistence_required
@@ -778,9 +780,11 @@ class Runtime:
                 volume_mounts.append((volume, mount))
                 if mount.name in seeded_names:
                     seeded_mounts.append((volume, mount))
+                elif lab.manifest.persistence_required:
+                    empty_volume_mounts.append((volume, mount))
                 checkpoint()
             seeder: ResourceRecord | None = None
-            if seeded_mounts:
+            if seeded_mounts or empty_volume_mounts:
                 seeder = self.docker.create_seeder(
                     name=f"{prefix}-seeder",
                     image=selected_reference,
@@ -788,6 +792,8 @@ class Runtime:
                     seeded_mounts=tuple(seeded_mounts),
                     uid=storage.uid,
                     gid=storage.gid,
+                    empty_mounts=tuple(empty_volume_mounts),
+                    persistent=lab.manifest.persistence_required,
                 )
                 resources.append(seeder)
                 checkpoint()
@@ -847,6 +853,11 @@ class Runtime:
             inspections = self._validate_state(state, lab=lab, enforce_policy=True)
             if not self._complete_layout(lab, state, inspections):
                 raise IntegrityError("new runtime failed its exact steady-state layout check")
+            state = replace(state, phase="steady")
+            if persist:
+                self.store.save(state)
+            if on_checkpoint is not None:
+                on_checkpoint(state)
         except BaseException:
             # Cover the narrow create-to-checkpoint window: an exact managed
             # object may exist even when its create call never returned to append
@@ -929,6 +940,36 @@ class Runtime:
         self.paths.ensure()
         self._preflight_lab(lab)
         existing = self.store.load(lab.manifest.id)
+        if existing is not None and existing.phase == "provisioning":
+            if existing.manifest_identity != lab.manifest_identity:
+                raise PolicyError(
+                    "interrupted provisioning belongs to a different reviewed manifest; "
+                    "remove it explicitly"
+                )
+            if not existing.trusted:
+                if not unsafe_development:
+                    raise PolicyError(
+                        "interrupted provisioning is an untrusted development run; repeat with "
+                        "--unsafe-development or remove it explicitly"
+                    )
+                if unsafe_image is not None and unsafe_image != existing.requested_reference:
+                    raise PolicyError(
+                        "the requested unsafe image differs from interrupted provisioning; "
+                        "remove it explicitly before changing images"
+                    )
+                unsafe_image = existing.requested_reference
+            elif unsafe_image is not None:
+                raise PolicyError(
+                    "an unsafe image cannot replace interrupted trusted provisioning; remove "
+                    "the partial run explicitly first"
+                )
+            host_port = existing.host_port
+            adopted = self._adopt_journaled_candidate(lab, existing)
+            if adopted != existing:
+                self.store.save(adopted)
+            self._cleanup(adopted)
+            self.store.delete(lab.manifest.id)
+            existing = None
         if existing is not None and existing.phase == "rebuild":
             return self._resume_persistent_rebuild(lab, existing)
         if existing is not None and existing.manifest_identity == lab.manifest_identity:
@@ -1597,11 +1638,12 @@ class Runtime:
                 "execution recovery, or stop, remove, or purge for cleanup-only recovery"
             )
         state = self.store.load(lab.manifest.id)
-        if state is not None and state.phase == "rebuild":
+        if state is not None and state.phase in {"provisioning", "rebuild"}:
+            operation = "provisioning" if state.phase == "provisioning" else "persistent rebuild"
             raise PolicyError(
-                "an interrupted persistent rebuild is pending; status, logs, open, and verify "
-                "never execute recovery. Use up, restart, or rebuild to resume it, or stop, "
-                "remove, reset, or purge for cleanup-only handling"
+                f"an interrupted {operation} is pending; status, logs, open, and verify never "
+                "execute recovery. Use up, restart, or rebuild for explicit execution recovery, "
+                "or stop, remove, reset, or purge for cleanup-only handling"
             )
 
     def _recover_runtime_transients_for_cleanup(self, lab: ReviewedLab) -> None:
@@ -1613,6 +1655,12 @@ class Runtime:
         if state is None or state.runtime_policy is None:
             return
         adopted = self._adopt_journaled_candidate(lab, state)
+        if adopted.phase == "provisioning":
+            if adopted != state:
+                self.store.save(adopted)
+            self._cleanup(adopted)
+            self.store.delete(lab.manifest.id)
+            return
         adopted = self._adopt_rollback_seeder(adopted, validate_policy=False)
         adopted, _ = self._discard_rollback_seeder(adopted)
         if adopted != state:
@@ -1623,13 +1671,28 @@ class Runtime:
         with self._lifecycle():
             self._validate_candidate(lab)
             self._preflight_lab(lab)
+            self._recover_update(lab)
+            pending_runtime = self.store.load(lab.manifest.id)
+            if (
+                pending_runtime is not None
+                and pending_runtime.phase == "provisioning"
+                and (
+                    pending_runtime.manifest_identity != lab.manifest_identity
+                    or not pending_runtime.trusted
+                )
+            ):
+                raise PolicyError(
+                    "interrupted provisioning is not a trusted instance of this reviewed "
+                    "manifest; remove it explicitly before update"
+                )
+            if pending_runtime is not None and pending_runtime.phase == "provisioning":
+                self._recover_runtime_transients_for_cleanup(lab)
             current = self.store.load(lab.manifest.id)
             if current is not None and current.phase != "steady":
                 raise PolicyError(
                     "an interrupted persistent rebuild must be resolved before an update"
                 )
-            self._recover_update(lab)
-            previous = self.store.load(lab.manifest.id)
+            previous = current
             if previous is None:
                 status = self._status(lab)
                 return RuntimeUpdate(
@@ -1713,6 +1776,7 @@ class Runtime:
                 upstream_port=lab.manifest.services[0].internal_port,
                 runtime_policy=_runtime_policy(lab),
                 created_at=candidate_created_at,
+                phase="provisioning",
             )
             journal = UpdateJournal(
                 1,
@@ -1905,17 +1969,19 @@ class Runtime:
             self._require_runnable(lab)
             self._preflight_lab(lab)
             self._recover_update(lab)
-            current = self.store.load(lab.manifest.id)
-            if current is not None and current.manifest_identity != lab.manifest_identity:
+            pending = self.store.load(lab.manifest.id)
+            port = pending.host_port if pending else 80
+            if pending is not None and pending.manifest_identity != lab.manifest_identity:
                 raise PolicyError(
                     "installed reviewed lock differs from the preserved runtime; use update"
                 )
-            if current is not None and not current.trusted:
+            if pending is not None and not pending.trusted:
                 raise PolicyError(
                     "restart refuses an untrusted development run before stopping it; "
                     "resume it explicitly with up --unsafe-development"
                 )
-            port = current.host_port if current else 80
+            if pending is not None and pending.phase == "provisioning":
+                self._recover_runtime_transients_for_cleanup(lab)
             self._stop(lab)
             return self._up(lab, host_port=port)
 
@@ -2209,6 +2275,25 @@ class Runtime:
             self._require_runnable(lab)
             self._preflight_lab(lab)
             self._recover_update(lab)
+            pending = self.store.load(lab.manifest.id)
+            port = pending.host_port if pending else 80
+            if pending is not None and pending.manifest_identity != lab.manifest_identity:
+                raise PolicyError(
+                    "installed reviewed lock differs from the preserved runtime; use update"
+                )
+            if pending is not None:
+                application = _application_image(lab)
+                if (
+                    not pending.trusted
+                    or pending.requested_reference != application.reference
+                    or pending.resolved_digest != application.digest
+                ):
+                    raise PolicyError(
+                        "preserved runtime image reference differs from the reviewed lock; "
+                        "remove and start it explicitly"
+                    )
+            if pending is not None and pending.phase == "provisioning":
+                self._recover_runtime_transients_for_cleanup(lab)
             state = self.store.load(lab.manifest.id)
             if state is not None and state.manifest_identity != lab.manifest_identity:
                 raise PolicyError(
@@ -2237,7 +2322,7 @@ class Runtime:
                     rebuilding = replace(state, phase="rebuild")
                     self.store.save(rebuilding)
                     return self._resume_persistent_rebuild(lab, rebuilding)
-            port = state.host_port if state else 80
+            port = state.host_port if state else port
             self._remove(lab)
             return self._up(lab, host_port=port)
 
@@ -2246,6 +2331,23 @@ class Runtime:
             self._require_runnable(lab)
             self._preflight_lab(lab)
             self._recover_update_for_cleanup(lab)
+            pending = self.store.load(lab.manifest.id)
+            port = pending.host_port if pending else 80
+            if pending is not None and pending.manifest_identity != lab.manifest_identity:
+                raise PolicyError(
+                    "installed reviewed lock differs from the preserved runtime; use update"
+                )
+            if pending is not None:
+                application = _application_image(lab)
+                if (
+                    not pending.trusted
+                    or pending.requested_reference != application.reference
+                    or pending.resolved_digest != application.digest
+                ):
+                    raise PolicyError(
+                        "reset refuses an untrusted or differently locked runtime; remove it "
+                        "explicitly"
+                    )
             self._recover_runtime_transients_for_cleanup(lab)
             state = self.store.load(lab.manifest.id)
             if state is not None and state.manifest_identity != lab.manifest_identity:
@@ -2263,7 +2365,7 @@ class Runtime:
                         "reset refuses an untrusted or differently locked runtime; remove it "
                         "explicitly"
                     )
-            port = state.host_port if state else 80
+            port = state.host_port if state else port
             self._remove(lab)
             return self._up(lab, host_port=port)
 

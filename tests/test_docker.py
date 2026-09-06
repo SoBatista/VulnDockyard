@@ -258,18 +258,25 @@ def seeder_inspection(
     mount: EphemeralMount,
     *,
     image: str = "registry.example.test/app@sha256:" + "1" * 64,
+    empty_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...] = (),
+    persistent: bool = False,
+    uid: int = 65532,
+    gid: int = 65532,
 ) -> dict[str, object]:
-    payload = json.dumps(
-        [{"source": mount.container_path, "target": f"/vdy-seed/{mount.name}"}],
-        sort_keys=True,
-        separators=(",", ":"),
+    seeded_mounts = ((volume, mount),)
+    payload = Docker.seeder_payload(
+        seeded_mounts,
+        empty_mounts=empty_mounts,
+        uid=uid,
+        gid=gid,
+        persistent=persistent,
     )
     return {
         "Id": "a" * 64,
         "Name": "/vdy-juice-shop-cccccccccccc-seeder",
         "Config": {
             "Image": image,
-            "User": "65532:65532",
+            "User": "0:0" if persistent else f"{uid}:{gid}",
             "Entrypoint": ["/nodejs/bin/node"],
             "Cmd": ["-e", SEED_SCRIPT, payload],
             "Labels": role_labels(value, "seeder"),
@@ -285,7 +292,7 @@ def seeder_inspection(
             "IpcMode": "private",
             "UsernsMode": "",
             "CapDrop": ["ALL"],
-            "CapAdd": None,
+            "CapAdd": ["CAP_CHOWN"] if persistent else None,
             "SecurityOpt": ["no-new-privileges=true"],
             "Devices": [],
             "DeviceRequests": None,
@@ -302,10 +309,11 @@ def seeder_inspection(
         "Mounts": [
             {
                 "Type": "volume",
-                "Name": volume.name,
-                "Destination": f"/vdy-seed/{mount.name}",
+                "Name": current_volume.name,
+                "Destination": f"/vdy-seed/{current_mount.name}",
                 "RW": True,
             }
+            for current_volume, current_mount in (*seeded_mounts, *empty_mounts)
         ],
         "NetworkSettings": {"Networks": {"none": {"NetworkID": "", "EndpointID": ""}}},
         "State": {"Running": False},
@@ -366,6 +374,27 @@ def test_application_command_has_containment_and_no_publication() -> None:
     ]
     assert "--privileged" not in call
     assert runner.environments[-1] == fake_connection().environment()
+
+
+def test_application_rejects_root_identity_before_docker_mutation() -> None:
+    runner = RecordingRunner()
+    docker = Docker(runner, connection=fake_connection())
+
+    with pytest.raises(PolicyError, match="non-root UID and GID"):
+        docker.create_application(
+            name="vdy-juice-shop-cccccccccccc-app",
+            image="registry.example.test/app@sha256:" + "1" * 64,
+            network="vdy-network",
+            ownership=ownership(),
+            memory_mb=512,
+            cpus=0.5,
+            pids=256,
+            read_only=True,
+            storage_uid=0,
+            storage_gid=0,
+        )
+
+    assert runner.calls == []
 
 
 def test_application_command_mounts_only_exact_reviewed_writable_paths() -> None:
@@ -965,6 +994,96 @@ def test_seeder_uses_locked_image_fixed_node_script_and_strict_containment() -> 
     assert "--privileged" not in call
 
 
+def test_persistent_seeder_initializes_exact_volumes_for_nonroot_application() -> None:
+    runner = RecordingRunner()
+    data_volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+    )
+    logs_volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-logs",
+        "vdy-juice-shop-cccccccccccc-volume-logs",
+    )
+    data_mount = EphemeralMount("data", "/juice-shop/data", 64)
+    logs_mount = EphemeralMount("logs", "/juice-shop/logs", 16)
+    image = "registry.example.test/app@sha256:" + "1" * 64
+    empty_mounts = ((logs_volume, logs_mount),)
+    runner.responses = [
+        Result(("docker",), 0, "a" * 64 + "\n", ""),
+        Result(
+            ("docker",),
+            0,
+            json.dumps(
+                [
+                    seeder_inspection(
+                        ownership(),
+                        data_volume,
+                        data_mount,
+                        image=image,
+                        empty_mounts=empty_mounts,
+                        persistent=True,
+                    )
+                ]
+            ),
+            "",
+        ),
+    ]
+    docker = Docker(runner, connection=fake_connection())
+
+    docker.create_seeder(
+        name="vdy-juice-shop-cccccccccccc-seeder",
+        image=image,
+        ownership=ownership(),
+        seeded_mounts=((data_volume, data_mount),),
+        empty_mounts=empty_mounts,
+        uid=65532,
+        gid=65532,
+        persistent=True,
+    )
+
+    call = next(call for call in runner.calls if call[3:5] == ("container", "create"))
+    assert call[call.index("--user") + 1] == "0:0"
+    assert call[call.index("--cap-drop") + 1] == "ALL"
+    assert call[call.index("--cap-add") + 1] == "CHOWN"
+    assert call[call.index("--network") + 1] == "none"
+    assert json.loads(call[-1]) == {
+        "mounts": [
+            {"seed": True, "source": "/juice-shop/data", "target": "/vdy-seed/data"},
+            {"seed": False, "source": "/juice-shop/logs", "target": "/vdy-seed/logs"},
+        ],
+        "ownership": {"gid": 65532, "uid": 65532},
+    }
+    mount_specs = [call[index + 1] for index, value in enumerate(call) if value == "--mount"]
+    assert mount_specs == [
+        ("type=volume,src=vdy-juice-shop-cccccccccccc-volume-data,dst=/vdy-seed/data"),
+        ("type=volume,src=vdy-juice-shop-cccccccccccc-volume-logs,dst=/vdy-seed/logs"),
+    ]
+
+    inspection = seeder_inspection(
+        ownership(),
+        data_volume,
+        data_mount,
+        image=image,
+        empty_mounts=empty_mounts,
+        persistent=True,
+    )
+    host = inspection["HostConfig"]
+    assert isinstance(host, dict)
+    host["CapAdd"] = ["CAP_CHOWN", "CAP_SYS_ADMIN"]
+    with pytest.raises(PolicyError, match="unsafe capabilities"):
+        Docker.validate_seeder_policy(
+            inspection,
+            image=image,
+            seeded_mounts=((data_volume, data_mount),),
+            empty_mounts=empty_mounts,
+            uid=65532,
+            gid=65532,
+            persistent=True,
+        )
+
+
 def test_seeder_policy_mismatch_removes_only_exact_validated_container() -> None:
     volume = ResourceRecord(
         "volume",
@@ -1042,7 +1161,7 @@ def test_seeder_policy_rejects_extra_security_options() -> None:
     host = inspection["HostConfig"]
     assert isinstance(host, dict)
     host["UsernsMode"] = "private"
-    with pytest.raises(PolicyError, match="namespaces or capabilities"):
+    with pytest.raises(PolicyError, match="unsafe namespaces"):
         Docker.validate_seeder_policy(
             inspection,
             image="registry.example.test/app@sha256:" + "1" * 64,
