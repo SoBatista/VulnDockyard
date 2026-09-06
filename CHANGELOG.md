@@ -33,6 +33,10 @@ Target release: 1.0.0 (not yet released).
 
 ### Fixed
 
+- Align the Juice Shop rebuild smoke with upstream's documented self-healing:
+  application state is intentionally ephemeral and its SQLite schema is recreated
+  on every process start, while generic persistent-volume behavior remains covered
+  by controller policy tests.
 - Validate generated SPDX 2.3 SBOMs with the pinned official SPDX tool, keep clean
   installation checks free of development dependencies, and fail final checkpoints
   when any managed Docker resource remains. Checkpoints now distinguish a local pass

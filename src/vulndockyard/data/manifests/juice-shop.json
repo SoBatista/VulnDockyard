@@ -183,6 +183,7 @@
   ],
   "known_limitations": [
     "Docker Danger Zone challenges are disabled by upstream default",
+    "Upstream recreates its SQLite database on every process start, so this adapter declares application state ephemeral and rebuild begins from a clean database",
     "Client-side cookies can retain progress after server reset",
     "Port 80 must be available unless an explicit alternate --port is selected"
   ],
@@ -205,6 +206,7 @@
     "cve": []
   },
   "references": [
+    "https://github.com/juice-shop/juice-shop/blob/5658473cf8814459bf89000ce373b20ed0b4eb37/server.ts#L753-L758",
     "https://pwning.owasp-juice.shop/companion-guide/latest/part1/running.html",
     "https://pwning.owasp-juice.shop/companion-guide/latest/part1/challenges.html"
   ]
