@@ -15,7 +15,14 @@ visitor; containment must assume that outcome.
 - Runnable images require immutable digests and separate publisher evidence.
 - Arbitrary images are explicitly untrusted even when digest-pinned.
 - The application is unpublished, has no automatic restart, receives finite
-  memory/CPU/PID limits, drops capabilities, and is denied a default route.
+  memory/CPU/PID limits, drops capabilities, and is denied a default route. Its
+  Docker 28+ internal bridge additionally uses isolated IPv4 gateway mode.
+- Every newly created bridge is inspected by returned object ID for the expected
+  driver, internal flag, exact driver options, and full ownership identity before
+  any container is attached.
+- Effective container image, user, command, namespaces, capabilities, devices,
+  resource/log limits, writable mounts, and exact network attachments are
+  revalidated against the reviewed runtime contract during lifecycle inspection.
 - Only the constrained gateway publishes, and only on `127.0.0.1`.
 - No host network, privileged mode, runtime socket, devices, host PID/IPC/user
   namespace, broad bind mounts, or uncontrolled builds are permitted.
@@ -38,6 +45,12 @@ blocked and require a future dedicated disposable-VM backend. A gateway could be
 attacked by malformed application responses. Docker caches vulnerable layers.
 Loopback services remain reachable by other local users/processes. Browser state
 can outlive server reset. Users must not add real credentials to labs.
+
+The local Docker daemon and its administrator are trusted. In particular, the
+daemon must retain Docker 28's default port-filtering behavior; an administrator
+can deliberately weaken it with `allow-direct-routing` or host firewall changes.
+The Engine API does not expose every effective daemon startup flag, so the
+controller cannot prove that an administrator has not disabled those filters.
 
 Out of scope: protecting a hostile host administrator, making the training apps
 production-safe, preventing every local browser-origin interaction, or claiming

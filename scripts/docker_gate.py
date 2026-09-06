@@ -13,7 +13,7 @@ SOURCE = ROOT / "src"
 if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 
-from vulndockyard.docker import Docker  # noqa: E402
+from vulndockyard.docker import MINIMUM_ENGINE_TEXT, Docker  # noqa: E402
 from vulndockyard.errors import VulnDockyardError  # noqa: E402
 
 
@@ -26,7 +26,15 @@ def main(argv: list[str] | None = None) -> int:
     docker = Docker()
     try:
         if args.gate == "preflight":
-            print(json.dumps(docker.preflight(), sort_keys=True, separators=(",", ":")))
+            detail = docker.preflight()
+            print(json.dumps(detail, sort_keys=True, separators=(",", ":")))
+            if detail.get("isolated_networking") is not True:
+                print(
+                    f"Docker Engine {MINIMUM_ENGINE_TEXT} or newer is required for "
+                    "isolated VulnDockyard lab networking",
+                    file=sys.stderr,
+                )
+                return 5
             return 0
         residual = docker.managed_resources()
     except VulnDockyardError as exc:

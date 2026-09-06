@@ -23,9 +23,14 @@ per-run internal app network --- app (unpublished, no egress)
                                      127.0.0.1:80 only
 ```
 
-Before a pull or start, the local Linux machine architecture is normalized to an
-explicit OCI platform and checked against every required locked image. Unknown
-operating systems or architectures fail closed.
+Before any pull or operation that can execute a runnable lab, the Docker Engine
+server version is parsed and required to be at least 28.0.0. The local Linux
+machine architecture is normalized to an explicit OCI platform and checked
+against every required locked image and the lock's reviewed smoke-test platforms.
+Advertising an architecture in image metadata is not treated as functional
+verification. Unknown versions, operating systems, architectures, or unverified
+platforms fail closed. Recovery operations that only stop or clean exact owned
+resources remain available on an older Engine.
 
 The gateway's separate ingress network is intentional. On Docker Engine, marking
 the gateway ingress network `--internal` makes its published loopback mapping
@@ -39,6 +44,21 @@ does not need this capability, but the locked official Caddy binary carries the
 corresponding file capability and Docker cannot execute it when that capability
 is absent from the bounding set. Its writable tmpfs mounts are owned by UID/GID 1000.
 
+The application bridge is created with both `--internal` and Docker's
+`com.docker.network.bridge.gateway_mode_ipv4=isolated` driver option. Immediately
+after each network creation, the controller inspects the exact returned object
+ID and requires the bridge driver, expected `Internal` flag, complete ownership
+identity, safe local/non-attachable/non-ingress/IPv4-only flags, and an exact
+gateway-mode option set. The ingress bridge explicitly requests ordinary `nat`
+mode and rejects routed, unprotected, or trusted-interface options. A policy
+mismatch is removed only after ownership validation; an
+ownership mismatch is left untouched and reported.
+
+This network boundary assumes Docker 28's default daemon port filtering remains
+enabled. Docker's effective `allow-direct-routing` startup state is not fully
+available through its Engine API; deliberately weakening daemon routing or host
+firewall policy is an administrator action outside the controller's trust boundary.
+
 Every resource records ownership, lab ID, manifest identity/version, run ID,
 creation time, trust state, and role. Names aid operators but confer no ownership.
 Any mismatch stops cleanup. State is checkpointed after each creation so an
@@ -47,6 +67,15 @@ interrupted start can recover exact object IDs.
 Application and gateway containers use Docker's bounded local logging driver
 (two 10 MiB files) and set the swap-inclusive memory ceiling equal to the memory
 limit, preventing a lab from gaining an unbounded host-log or swap budget.
+The application root is read-only. Each reviewed writable path is either a
+bounded direct tmpfs or an owned local-driver tmpfs volume. Seeded volumes are
+populated by a short-lived, network-disabled, same-image helper running a fixed
+controller-owned Node script; its exact readiness marker is required and no
+seeder remains in the steady state. The controller re-seeds volatile data after
+a stop, while reset/remove delete only the selected run's exactly owned storage.
+Every lifecycle inspection revalidates the effective image, user, fixed command,
+namespaces, capabilities, devices, resource/log limits, mounts, and exact network
+attachments before reporting a healthy managed state.
 
 An update candidate is never synthesized from mutable discovery data. It is the
 already-installed, schema-validated manifest/lock pair, and it is eligible only

@@ -10,12 +10,12 @@ import shutil
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 from urllib.parse import urlsplit
 
 from .errors import IntegrityError, PolicyError, PreflightError
-from .models import DIGEST, OCI_NAME
+from .models import DIGEST, OCI_NAME, EphemeralMount
 from .process import Result, Runner
 from .state import ResourceRecord, RunState
 
@@ -29,6 +29,49 @@ TRUSTED = "org.vulndockyard.trusted"
 ROLE = "org.vulndockyard.role"
 OBJECT_ID = re.compile(r"^[0-9a-f]{64}$")
 RESOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+ENGINE_VERSION = re.compile(
+    r"^(?P<major>0|[1-9][0-9]*)\."
+    r"(?P<minor>0|[1-9][0-9]*)\."
+    r"(?P<patch>0|[1-9][0-9]*)"
+    r"(?P<suffix>[-+~][0-9A-Za-z.+~_-]+)?$"
+)
+MINIMUM_ENGINE_VERSION = (28, 0, 0)
+MINIMUM_ENGINE_TEXT = ".".join(str(value) for value in MINIMUM_ENGINE_VERSION)
+GATEWAY_MODE_IPV4 = "com.docker.network.bridge.gateway_mode_ipv4"
+EPHEMERAL_MODE = "0700"
+SEED_ROOT = "/vdy-seed"
+SEED_READY_MARKER = "VULNDOCKYARD_SEED_READY_V1"
+SEED_SCRIPT = (
+    'const fs=require("fs");'
+    'if(typeof fs.cpSync!=="function"){throw new Error("fs.cpSync unavailable");}'
+    "const mounts=JSON.parse(process.argv[1]);"
+    "for(const mount of mounts){"
+    "fs.cpSync(mount.source,mount.target,{recursive:true,force:false,errorOnExist:true});"
+    "}"
+    f'process.stdout.write("{SEED_READY_MARKER}\\n");'
+    "setInterval(()=>{},2147483647);"
+)
+
+
+def parse_engine_version(value: object) -> tuple[tuple[int, int, int], str]:
+    """Parse a Docker server version without accepting ambiguous output."""
+    if not isinstance(value, str):
+        raise IntegrityError("Docker returned a non-string Engine server version")
+    match = ENGINE_VERSION.fullmatch(value)
+    if match is None:
+        raise IntegrityError(f"Docker returned a malformed Engine server version: {value!r}")
+    version = tuple(int(match.group(name)) for name in ("major", "minor", "patch"))
+    suffix = match.group("suffix") or ""
+    return cast(tuple[int, int, int], version), suffix
+
+
+def engine_supports_isolated_networking(value: object) -> bool:
+    version, suffix = parse_engine_version(value)
+    prerelease = bool(
+        suffix.startswith("-")
+        and re.match(r"-(?:alpha|beta|dev|pre|preview|rc)(?:[.-]|$)", suffix, re.IGNORECASE)
+    )
+    return version >= MINIMUM_ENGINE_VERSION and not prerelease
 
 
 def parse_image_reference(reference: str) -> tuple[str, str]:
@@ -231,6 +274,11 @@ class Docker:
         engine = self._run(
             ("info", "--format", "{{json .ServerVersion}}"), timeout=self.timeouts.inspect
         )
+        try:
+            server_version = json.loads(engine.stdout)
+        except json.JSONDecodeError as exc:
+            raise IntegrityError("Docker returned invalid Engine version JSON") from exc
+        version, suffix = parse_engine_version(server_version)
         compose_result = self._run(
             ("compose", "version", "--short"), timeout=self.timeouts.inspect, check=False
         )
@@ -238,7 +286,15 @@ class Docker:
         if require_compose and not compose:
             raise PreflightError("Docker Compose v2 is required for this operation")
         return {
-            "engine": json.loads(engine.stdout),
+            "engine": server_version,
+            "engine_version": {
+                "major": version[0],
+                "minor": version[1],
+                "patch": version[2],
+                "suffix": suffix,
+            },
+            "minimum_engine": MINIMUM_ENGINE_TEXT,
+            "isolated_networking": engine_supports_isolated_networking(server_version),
             "compose_v2": compose,
             "platform": local_platform,
         }
@@ -341,15 +397,56 @@ class Docker:
         self, name: str, ownership: Ownership, *, internal: bool = True
     ) -> ResourceRecord:
         args = ["network", "create", "--driver", "bridge"]
+        gateway_mode = "isolated" if internal else "nat"
         if internal:
             args.append("--internal")
+        args.extend(("--opt", f"{GATEWAY_MODE_IPV4}={gateway_mode}"))
         args.extend(ownership.labels("network"))
         args.append(name)
         result = self._run(tuple(args), timeout=self.timeouts.start)
         object_id = result.stdout.strip()
         if not OBJECT_ID.fullmatch(object_id):
             raise IntegrityError("Docker returned an invalid network ID")
-        return ResourceRecord("network", name, object_id)
+        record = ResourceRecord("network", name, object_id)
+        inspection = self.validate_owned(record, ownership)
+        try:
+            self.validate_network_policy(inspection, internal=internal)
+        except (IntegrityError, PolicyError):
+            # The exact newly-created object may be removed only after its complete
+            # ownership identity has been validated above.
+            self.remove(record)
+            raise
+        return record
+
+    @staticmethod
+    def validate_network_policy(inspection: dict[str, Any], *, internal: bool) -> None:
+        driver = inspection.get("Driver")
+        actual_internal = inspection.get("Internal")
+        options = inspection.get("Options")
+        if driver != "bridge":
+            raise PolicyError("new Docker network does not use the bridge driver")
+        if not isinstance(actual_internal, bool) or actual_internal is not internal:
+            raise PolicyError("new Docker network has an unexpected Internal setting")
+        expected_flags = {
+            "Attachable": False,
+            "ConfigOnly": False,
+            "EnableIPv6": False,
+            "Ingress": False,
+        }
+        if inspection.get("Scope") != "local" or any(
+            inspection.get(key) is not value for key, value in expected_flags.items()
+        ):
+            raise PolicyError("new Docker network has unsafe scope or mode flags")
+        if not isinstance(options, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in options.items()
+        ):
+            raise IntegrityError("new Docker network has malformed driver options")
+        expected_options = {
+            GATEWAY_MODE_IPV4: "isolated" if internal else "nat",
+        }
+        if options != expected_options:
+            kind = "internal" if internal else "ingress"
+            raise PolicyError(f"new Docker {kind} network has unexpected driver options")
 
     def create_application(
         self,
@@ -362,8 +459,20 @@ class Docker:
         cpus: float,
         pids: int,
         read_only: bool,
+        seeded_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...] = (),
+        empty_mounts: tuple[EphemeralMount, ...] = (),
+        storage_uid: int = 0,
+        storage_gid: int = 0,
     ) -> ResourceRecord:
         parse_image_reference(image)
+        if not read_only:
+            raise PolicyError("runnable application root filesystem must be read-only")
+        self._validate_ephemeral_mounts(
+            seeded_mounts=seeded_mounts,
+            empty_mounts=empty_mounts,
+            uid=storage_uid,
+            gid=storage_gid,
+        )
         args = [
             "container",
             "create",
@@ -393,10 +502,23 @@ class Docker:
             f"{cpus:g}",
             "--pids-limit",
             str(pids),
+            "--user",
+            f"{storage_uid}:{storage_gid}",
+            "--read-only",
         ]
-        if read_only:
+        for volume, mount in seeded_mounts:
             args.extend(
-                ("--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m")  # noqa: S108
+                (
+                    "--mount",
+                    f"type=volume,src={volume.name},dst={mount.container_path}",
+                )
+            )
+        for mount in empty_mounts:
+            args.extend(
+                (
+                    "--tmpfs",
+                    self._direct_tmpfs_spec(mount, uid=storage_uid, gid=storage_gid),
+                )
             )
         args.extend(ownership.labels("application"))
         args.append(image)
@@ -404,7 +526,336 @@ class Docker:
         object_id = result.stdout.strip()
         if not OBJECT_ID.fullmatch(object_id):
             raise IntegrityError("Docker returned an invalid container ID")
+        record = ResourceRecord("container", name, object_id)
+        inspection = self.validate_owned(record, ownership)
+        try:
+            self.validate_application_policy(
+                inspection,
+                image=image,
+                network=network,
+                memory_mb=memory_mb,
+                cpus=cpus,
+                pids=pids,
+                seeded_mounts=seeded_mounts,
+                empty_mounts=empty_mounts,
+                storage_uid=storage_uid,
+                storage_gid=storage_gid,
+            )
+        except (IntegrityError, PolicyError):
+            self.remove(record)
+            raise
+        return record
+
+    @classmethod
+    def validate_application_policy(
+        cls,
+        inspection: dict[str, Any],
+        *,
+        image: str,
+        network: str,
+        memory_mb: int,
+        cpus: float,
+        pids: int,
+        seeded_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...],
+        empty_mounts: tuple[EphemeralMount, ...],
+        storage_uid: int,
+        storage_gid: int,
+    ) -> None:
+        cls._validate_ephemeral_mounts(
+            seeded_mounts=seeded_mounts,
+            empty_mounts=empty_mounts,
+            uid=storage_uid,
+            gid=storage_gid,
+        )
+        config = inspection.get("Config")
+        host = inspection.get("HostConfig")
+        mounts = inspection.get("Mounts")
+        if (
+            not isinstance(config, dict)
+            or not isinstance(host, dict)
+            or not isinstance(mounts, list)
+        ):
+            raise IntegrityError("Docker application inspection is malformed")
+        if config.get("Image") != image or config.get("User") != f"{storage_uid}:{storage_gid}":
+            raise PolicyError("Docker application has unexpected image or user identity")
+        restart = host.get("RestartPolicy")
+        if (
+            host.get("NetworkMode") != network
+            or host.get("PortBindings") not in ({}, None)
+            or host.get("PublishAllPorts") is not False
+            or host.get("ReadonlyRootfs") is not True
+            or host.get("Privileged") is not False
+            or not isinstance(restart, dict)
+            or restart.get("Name") != "no"
+        ):
+            raise PolicyError("Docker application has unsafe core runtime configuration")
+        if (
+            any(host.get(key) not in ("", "private") for key in ("PidMode", "IpcMode"))
+            or host.get("UsernsMode") == "host"
+        ):
+            raise PolicyError("Docker application uses a host namespace")
+        if host.get("CapDrop") != ["ALL"] or host.get("CapAdd") not in (None, []):
+            raise PolicyError("Docker application has unexpected Linux capabilities")
+        security_options = host.get("SecurityOpt")
+        if (
+            not isinstance(security_options, list)
+            or "no-new-privileges=true" not in security_options
+        ):
+            raise PolicyError("Docker application lacks no-new-privileges")
+        if host.get("Devices") not in (None, []) or host.get("DeviceRequests") not in (None, []):
+            raise PolicyError("Docker application has unexpected device access")
+        expected_bytes = memory_mb * 1024 * 1024
+        expected_nano_cpus = round(cpus * 1_000_000_000)
+        if (
+            host.get("Memory") != expected_bytes
+            or host.get("MemorySwap") != expected_bytes
+            or host.get("NanoCpus") != expected_nano_cpus
+            or host.get("PidsLimit") != pids
+        ):
+            raise PolicyError("Docker application resource limits differ from the reviewed values")
+        expected_tmpfs = {
+            mount.container_path: cls._direct_tmpfs_spec(
+                mount, uid=storage_uid, gid=storage_gid
+            ).split(":", 1)[1]
+            for mount in empty_mounts
+        }
+        if host.get("Tmpfs", {}) != expected_tmpfs:
+            raise PolicyError("Docker application tmpfs mounts differ from the reviewed values")
+        if host.get("LogConfig") != {
+            "Type": "local",
+            "Config": {"max-file": "2", "max-size": "10m"},
+        }:
+            raise PolicyError("Docker application log limits differ from the reviewed values")
+        expected_volumes = {
+            (volume.name, mount.container_path, True) for volume, mount in seeded_mounts
+        }
+        actual_volumes: set[tuple[str, str, bool]] = set()
+        for mount in mounts:
+            if not isinstance(mount, dict):
+                raise IntegrityError("Docker application mount inspection is malformed")
+            mount_type = mount.get("Type")
+            name = mount.get("Name")
+            destination = mount.get("Destination")
+            writable = mount.get("RW")
+            if (
+                mount_type != "volume"
+                or not isinstance(name, str)
+                or not isinstance(destination, str)
+                or not isinstance(writable, bool)
+            ):
+                raise PolicyError("Docker application has an unreviewed filesystem mount")
+            actual_volumes.add((name, destination, writable))
+        if len(actual_volumes) != len(mounts) or actual_volumes != expected_volumes:
+            raise PolicyError("Docker application volume mounts differ from the reviewed values")
+
+    @staticmethod
+    def _validate_ephemeral_mount(mount: EphemeralMount) -> None:
+        path = PurePosixPath(mount.container_path)
+        if (
+            not RESOURCE_NAME.fullmatch(mount.name)
+            or not mount.name.islower()
+            or not mount.container_path.startswith("/")
+            or str(path) != mount.container_path
+            or mount.container_path == "/"
+            or "," in mount.container_path
+            or not 1 <= mount.size_mb <= 4096
+        ):
+            raise PolicyError("ephemeral storage mount is outside the reviewed safe contract")
+
+    @classmethod
+    def _validate_ephemeral_mounts(
+        cls,
+        *,
+        seeded_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...],
+        empty_mounts: tuple[EphemeralMount, ...],
+        uid: int,
+        gid: int,
+    ) -> None:
+        if (
+            not isinstance(uid, int)
+            or isinstance(uid, bool)
+            or not 0 <= uid <= 65_535
+            or not isinstance(gid, int)
+            or isinstance(gid, bool)
+            or not 0 <= gid <= 65_535
+        ):
+            raise PolicyError("ephemeral storage ownership is outside the reviewed safe contract")
+        names: set[str] = set()
+        paths: set[str] = set()
+        for volume, mount in seeded_mounts:
+            cls._validate_ephemeral_mount(mount)
+            if volume.kind != "volume" or volume.object_id != volume.name:
+                raise IntegrityError("seeded storage does not reference an exact named volume")
+            names.add(mount.name)
+            paths.add(mount.container_path)
+        for mount in empty_mounts:
+            cls._validate_ephemeral_mount(mount)
+            names.add(mount.name)
+            paths.add(mount.container_path)
+        if len(names) != len(seeded_mounts) + len(empty_mounts) or len(paths) != len(names):
+            raise IntegrityError("ephemeral storage mounts are duplicated")
+
+    @staticmethod
+    def _volume_options(mount: EphemeralMount, *, uid: int, gid: int) -> dict[str, str]:
+        return {
+            "type": "tmpfs",
+            "device": "tmpfs",
+            "o": f"size={mount.size_mb}m,uid={uid},gid={gid},mode={EPHEMERAL_MODE}",
+        }
+
+    @classmethod
+    def _direct_tmpfs_spec(cls, mount: EphemeralMount, *, uid: int, gid: int) -> str:
+        cls._validate_ephemeral_mount(mount)
+        return (
+            f"{mount.container_path}:rw,noexec,nosuid,nodev,size={mount.size_mb}m,"
+            f"uid={uid},gid={gid},mode={EPHEMERAL_MODE}"
+        )
+
+    def create_ephemeral_volume(
+        self,
+        *,
+        name: str,
+        mount: EphemeralMount,
+        ownership: Ownership,
+        uid: int,
+        gid: int,
+    ) -> ResourceRecord:
+        self._validate_ephemeral_mounts(
+            seeded_mounts=((ResourceRecord("volume", name, name), mount),),
+            empty_mounts=(),
+            uid=uid,
+            gid=gid,
+        )
+        options = self._volume_options(mount, uid=uid, gid=gid)
+        args = ["volume", "create", "--driver", "local"]
+        for key in ("type", "device", "o"):
+            args.extend(("--opt", f"{key}={options[key]}"))
+        args.extend(ownership.labels(f"volume-{mount.name}"))
+        args.append(name)
+        result = self._run(tuple(args), timeout=self.timeouts.start)
+        if result.stdout.strip() != name:
+            raise IntegrityError("Docker returned an unexpected volume identity")
+        record = ResourceRecord("volume", name, name)
+        inspection = self.validate_owned(record, ownership)
+        try:
+            self._validate_ephemeral_volume_policy(inspection, options=options)
+        except (IntegrityError, PolicyError):
+            self.remove(record)
+            raise
+        return record
+
+    @staticmethod
+    def _validate_ephemeral_volume_policy(
+        inspection: dict[str, Any], *, options: dict[str, str]
+    ) -> None:
+        if inspection.get("Driver") != "local":
+            raise PolicyError("ephemeral volume does not use Docker's local driver")
+        actual = inspection.get("Options")
+        if not isinstance(actual, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in actual.items()
+        ):
+            raise IntegrityError("ephemeral volume options are malformed")
+        if actual != options:
+            raise PolicyError("ephemeral volume has unexpected driver options")
+
+    def validate_ephemeral_volume(
+        self,
+        record: ResourceRecord,
+        ownership: Ownership,
+        mount: EphemeralMount,
+        *,
+        uid: int,
+        gid: int,
+    ) -> dict[str, Any]:
+        self._validate_ephemeral_mounts(
+            seeded_mounts=((record, mount),), empty_mounts=(), uid=uid, gid=gid
+        )
+        inspection = self.validate_owned(record, ownership)
+        self._validate_ephemeral_volume_policy(
+            inspection, options=self._volume_options(mount, uid=uid, gid=gid)
+        )
+        return inspection
+
+    def create_seeder(
+        self,
+        *,
+        name: str,
+        image: str,
+        ownership: Ownership,
+        seeded_mounts: tuple[tuple[ResourceRecord, EphemeralMount], ...],
+        uid: int,
+        gid: int,
+    ) -> ResourceRecord:
+        parse_image_reference(image)
+        if not seeded_mounts:
+            raise IntegrityError("a storage seeder requires at least one reviewed mount")
+        self._validate_ephemeral_mounts(
+            seeded_mounts=seeded_mounts, empty_mounts=(), uid=uid, gid=gid
+        )
+        payload = json.dumps(
+            [
+                {"source": mount.container_path, "target": f"{SEED_ROOT}/{mount.name}"}
+                for _, mount in seeded_mounts
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        args = [
+            "container",
+            "create",
+            "--name",
+            name,
+            "--network",
+            "none",
+            "--restart",
+            "no",
+            "--log-driver",
+            "local",
+            "--log-opt",
+            "max-size=1m",
+            "--log-opt",
+            "max-file=1",
+            "--user",
+            f"{uid}:{gid}",
+            "--read-only",
+            "--security-opt",
+            "no-new-privileges=true",
+            "--cap-drop",
+            "ALL",
+            "--memory",
+            "128m",
+            "--memory-swap",
+            "128m",
+            "--cpus",
+            "0.25",
+            "--pids-limit",
+            "64",
+        ]
+        for volume, mount in seeded_mounts:
+            args.extend(
+                (
+                    "--mount",
+                    f"type=volume,src={volume.name},dst={SEED_ROOT}/{mount.name}",
+                )
+            )
+        args.extend(ownership.labels("seeder"))
+        args.extend(("--entrypoint", "/nodejs/bin/node", image, "-e", SEED_SCRIPT, payload))
+        result = self._run(tuple(args), timeout=self.timeouts.start)
+        object_id = result.stdout.strip()
+        if not OBJECT_ID.fullmatch(object_id):
+            raise IntegrityError("Docker returned an invalid seeder container ID")
         return ResourceRecord("container", name, object_id)
+
+    def read_logs(self, record: ResourceRecord, *, timeout: float, tail: int = 20) -> Result:
+        if record.kind != "container":
+            raise ValueError("logs require a container")
+        if not 0 < timeout <= self.timeouts.inspect:
+            raise ValueError("log read timeout exceeds the bounded inspection timeout")
+        return self._run(
+            ("container", "logs", "--tail", str(tail), record.object_id),
+            timeout=timeout,
+            check=False,
+        )
 
     def create_gateway(
         self,
@@ -474,7 +925,99 @@ class Docker:
         object_id = result.stdout.strip()
         if not OBJECT_ID.fullmatch(object_id):
             raise IntegrityError("Docker returned an invalid gateway container ID")
-        return ResourceRecord("container", name, object_id)
+        record = ResourceRecord("container", name, object_id)
+        inspection = self.validate_owned(record, ownership)
+        try:
+            self.validate_gateway_policy(
+                inspection,
+                image=image,
+                network=network,
+                upstream_port=upstream_port,
+                host_port=host_port,
+            )
+        except (IntegrityError, PolicyError):
+            self.remove(record)
+            raise
+        return record
+
+    @staticmethod
+    def validate_gateway_policy(
+        inspection: dict[str, Any],
+        *,
+        image: str,
+        network: str,
+        upstream_port: int,
+        host_port: int,
+    ) -> None:
+        config = inspection.get("Config")
+        host = inspection.get("HostConfig")
+        mounts = inspection.get("Mounts")
+        if (
+            not isinstance(config, dict)
+            or not isinstance(host, dict)
+            or not isinstance(mounts, list)
+        ):
+            raise IntegrityError("Docker gateway inspection is malformed")
+        expected_command = [
+            "caddy",
+            "reverse-proxy",
+            "--from",
+            ":8080",
+            "--to",
+            f"app:{upstream_port}",
+        ]
+        if (
+            config.get("Image") != image
+            or config.get("User") != "1000:1000"
+            or config.get("Cmd") != expected_command
+        ):
+            raise PolicyError("Docker gateway has unexpected image, user, or command identity")
+        expected_binding = {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(host_port)}]}
+        if host.get("PortBindings") != expected_binding:
+            raise PolicyError("Docker gateway does not have one exact loopback binding")
+        restart = host.get("RestartPolicy")
+        if (
+            host.get("NetworkMode") != network
+            or host.get("PublishAllPorts") is not False
+            or host.get("ReadonlyRootfs") is not True
+            or host.get("Privileged") is not False
+            or not isinstance(restart, dict)
+            or restart.get("Name") != "no"
+        ):
+            raise PolicyError("Docker gateway has unsafe core runtime configuration")
+        if (
+            any(host.get(key) not in ("", "private") for key in ("PidMode", "IpcMode"))
+            or host.get("UsernsMode") == "host"
+        ):
+            raise PolicyError("Docker gateway uses a host namespace")
+        if host.get("CapDrop") != ["ALL"] or host.get("CapAdd") != ["NET_BIND_SERVICE"]:
+            raise PolicyError("Docker gateway has unexpected Linux capabilities")
+        security_options = host.get("SecurityOpt")
+        if (
+            not isinstance(security_options, list)
+            or "no-new-privileges=true" not in security_options
+        ):
+            raise PolicyError("Docker gateway lacks no-new-privileges")
+        if host.get("Devices") not in (None, []) or host.get("DeviceRequests") not in (None, []):
+            raise PolicyError("Docker gateway has unexpected device access")
+        if (
+            host.get("Memory") != 128 * 1024 * 1024
+            or host.get("MemorySwap") != 128 * 1024 * 1024
+            or host.get("NanoCpus") != 250_000_000
+            or host.get("PidsLimit") != 64
+        ):
+            raise PolicyError("Docker gateway resource limits differ from the reviewed values")
+        expected_tmpfs = dict.fromkeys(
+            ("/config", "/data"),
+            "rw,noexec,nosuid,nodev,size=8m,uid=1000,gid=1000,mode=0700",
+        )
+        if host.get("Tmpfs") != expected_tmpfs or mounts:
+            raise PolicyError("Docker gateway filesystem mounts differ from the reviewed values")
+        if host.get("LogConfig") != {
+            "Type": "local",
+            "Config": {"max-file": "2", "max-size": "10m"},
+        }:
+            raise PolicyError("Docker gateway log limits differ from the reviewed values")
 
     def connect_network(self, network: ResourceRecord, container: ResourceRecord) -> None:
         if network.kind != "network" or container.kind != "container":
@@ -483,6 +1026,21 @@ class Docker:
             ("network", "connect", network.object_id, container.object_id),
             timeout=self.timeouts.start,
         )
+
+    def network_connected(self, network: ResourceRecord, container: ResourceRecord) -> bool:
+        if network.kind != "network" or container.kind != "container":
+            raise ValueError("network inspection requires a network and container record")
+        inspection = self.inspect("container", container.object_id)
+        settings = inspection.get("NetworkSettings")
+        networks = settings.get("Networks") if isinstance(settings, dict) else None
+        if not isinstance(networks, dict):
+            raise IntegrityError("Docker container network inspection is malformed")
+        attachment = networks.get(network.name)
+        if attachment is None:
+            return False
+        if not isinstance(attachment, dict) or attachment.get("NetworkID") != network.object_id:
+            raise PolicyError("Docker container network attachment identity differs from state")
+        return True
 
     def start(self, record: ResourceRecord) -> None:
         if record.kind != "container":
@@ -552,10 +1110,14 @@ def expected_resource_role(record: ResourceRecord, ownership: Ownership) -> str:
     if not record.name.startswith(prefix):
         raise PolicyError(f"refusing {record.kind} {record.name}: deterministic name mismatch")
     suffix = record.name[len(prefix) :]
-    if record.kind == "container" and suffix in {"app", "gateway"}:
-        return "application" if suffix == "app" else "gateway"
+    if record.kind == "container" and suffix in {"app", "gateway", "seeder"}:
+        if suffix == "app":
+            return "application"
+        return suffix
     if record.kind == "network" and suffix in {"net", "ingress"}:
         return "network"
-    if record.kind == "volume" and (suffix == "volume" or suffix.startswith("volume-")):
+    if record.kind == "volume" and suffix == "volume":
         return "volume"
+    if record.kind == "volume" and suffix.startswith("volume-") and len(suffix) > len("volume-"):
+        return suffix
     raise PolicyError(f"refusing {record.kind} {record.name}: resource role is not recognized")

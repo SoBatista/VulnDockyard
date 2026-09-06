@@ -11,7 +11,17 @@ import pytest
 
 import vulndockyard.cli as cli
 from vulndockyard.catalogue import Catalogue, ReviewedLab
-from vulndockyard.docker import LAB, MANIFEST, OWNER, Ownership, Timeouts, expected_resource_role
+from vulndockyard.docker import (
+    GATEWAY_MODE_IPV4,
+    LAB,
+    MANIFEST,
+    OWNER,
+    SEED_READY_MARKER,
+    Docker,
+    Ownership,
+    Timeouts,
+    expected_resource_role,
+)
 from vulndockyard.errors import IntegrityError, PolicyError, PreflightError
 from vulndockyard.paths import Paths
 from vulndockyard.process import Result
@@ -31,10 +41,21 @@ class FakeDocker:
         self.ports: dict[int, str] = {}
         self.create_count = 0
         self.fail_gateway = False
+        self.fail_seeder = False
+        self.seeder_ready = True
+        self.seeder_exits = False
+        self.engine_version = "28.0.0"
 
     def _id(self) -> str:
         self.create_count += 1
         return f"{self.create_count:064x}"
+
+    def _network_id(self, name: str) -> str:
+        return next(
+            object_id
+            for object_id, inspection in self.objects.items()
+            if inspection.get("Name") == name and "Config" not in inspection
+        )
 
     @staticmethod
     def _label_map(value: Ownership, role: str) -> dict[str, str]:
@@ -51,7 +72,10 @@ class FakeDocker:
 
     def preflight(self, *, require_compose: bool = False) -> dict[str, object]:
         return {
-            "engine": "test",
+            "engine": self.engine_version,
+            "engine_version": {"major": int(self.engine_version.split(".", 1)[0])},
+            "minimum_engine": "28.0.0",
+            "isolated_networking": int(self.engine_version.split(".", 1)[0]) >= 28,
             "compose_v2": not require_compose,
             "platform": "linux/amd64",
         }
@@ -67,9 +91,20 @@ class FakeDocker:
             "Id": object_id,
             "Name": name,
             "Labels": self._label_map(ownership, "network"),
+            "Driver": "bridge",
+            "Scope": "local",
             "Internal": internal,
+            "Attachable": False,
+            "ConfigOnly": False,
+            "EnableIPv6": False,
+            "Ingress": False,
+            "Options": {GATEWAY_MODE_IPV4: "isolated" if internal else "nat"},
         }
         return ResourceRecord("network", name, object_id)
+
+    @staticmethod
+    def validate_network_policy(inspection: dict[str, Any], *, internal: bool) -> None:
+        Docker.validate_network_policy(inspection, internal=internal)
 
     def create_application(self, **values: Any) -> ResourceRecord:
         object_id = self._id()
@@ -80,10 +115,111 @@ class FakeDocker:
             "Config": {
                 "Labels": self._label_map(owner, "application"),
                 "Image": values["image"],
+                "User": f"{values['storage_uid']}:{values['storage_gid']}",
             },
-            "HostConfig": {"PortBindings": {}},
+            "HostConfig": {
+                "PortBindings": {},
+                "PublishAllPorts": False,
+                "NetworkMode": values["network"],
+                "ReadonlyRootfs": values["read_only"],
+                "Privileged": False,
+                "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+                "PidMode": "",
+                "IpcMode": "private",
+                "UsernsMode": "",
+                "CapDrop": ["ALL"],
+                "CapAdd": None,
+                "SecurityOpt": ["no-new-privileges=true"],
+                "Devices": [],
+                "DeviceRequests": [],
+                "Memory": values["memory_mb"] * 1024 * 1024,
+                "MemorySwap": values["memory_mb"] * 1024 * 1024,
+                "NanoCpus": round(values["cpus"] * 1_000_000_000),
+                "PidsLimit": values["pids"],
+                "LogConfig": {
+                    "Type": "local",
+                    "Config": {"max-file": "2", "max-size": "10m"},
+                },
+                "Tmpfs": {
+                    mount.container_path: (
+                        f"rw,noexec,nosuid,nodev,size={mount.size_mb}m,"
+                        f"uid={values['storage_uid']},gid={values['storage_gid']},mode=0700"
+                    )
+                    for mount in values["empty_mounts"]
+                },
+            },
+            "Mounts": [
+                {
+                    "Type": "volume",
+                    "Name": volume.name,
+                    "Destination": mount.container_path,
+                    "RW": True,
+                }
+                for volume, mount in values["seeded_mounts"]
+            ],
+            "NetworkSettings": {
+                "Networks": {values["network"]: {"NetworkID": self._network_id(values["network"])}}
+            },
             "State": {"Running": False},
         }
+        return ResourceRecord("container", values["name"], object_id)
+
+    @staticmethod
+    def validate_application_policy(inspection: dict[str, Any], **values: Any) -> None:
+        Docker.validate_application_policy(inspection, **values)
+
+    def create_ephemeral_volume(self, **values: Any) -> ResourceRecord:
+        self.create_count += 1
+        name = values["name"]
+        mount = values["mount"]
+        owner: Ownership = values["ownership"]
+        options = {
+            "type": "tmpfs",
+            "device": "tmpfs",
+            "o": (f"size={mount.size_mb}m,uid={values['uid']},gid={values['gid']},mode=0700"),
+        }
+        self.objects[name] = {
+            "Name": name,
+            "Driver": "local",
+            "Options": options,
+            "Labels": self._label_map(owner, f"volume-{mount.name}"),
+        }
+        self.events.append(("create-volume", mount.name))
+        return ResourceRecord("volume", name, name)
+
+    def validate_ephemeral_volume(
+        self,
+        record: ResourceRecord,
+        ownership: Ownership,
+        mount: Any,
+        *,
+        uid: int,
+        gid: int,
+    ) -> dict[str, Any]:
+        inspection = self.validate_owned(record, ownership)
+        expected = {
+            "type": "tmpfs",
+            "device": "tmpfs",
+            "o": f"size={mount.size_mb}m,uid={uid},gid={gid},mode=0700",
+        }
+        if inspection.get("Driver") != "local" or inspection.get("Options") != expected:
+            raise PolicyError("ephemeral volume has unexpected driver options")
+        return inspection
+
+    def create_seeder(self, **values: Any) -> ResourceRecord:
+        if self.fail_seeder:
+            raise PreflightError("synthetic seeder failure")
+        object_id = self._id()
+        owner: Ownership = values["ownership"]
+        self.objects[object_id] = {
+            "Id": object_id,
+            "Name": values["name"],
+            "Config": {"Labels": self._label_map(owner, "seeder"), "Image": values["image"]},
+            "HostConfig": {"PortBindings": {}, "ReadonlyRootfs": True},
+            "NetworkSettings": {"Networks": {}},
+            "State": {"Running": False},
+        }
+        self.events.append(("create-seeder", values["image"]))
         return ResourceRecord("container", values["name"], object_id)
 
     def create_gateway(self, **values: Any) -> ResourceRecord:
@@ -100,9 +236,47 @@ class FakeDocker:
             "Config": {
                 "Labels": self._label_map(owner, "gateway"),
                 "Image": values["image"],
+                "User": "1000:1000",
+                "Cmd": [
+                    "caddy",
+                    "reverse-proxy",
+                    "--from",
+                    ":8080",
+                    "--to",
+                    f"app:{values['upstream_port']}",
+                ],
             },
             "HostConfig": {
-                "PortBindings": {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(port)}]}
+                "PortBindings": {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(port)}]},
+                "NetworkMode": values["network"],
+                "PublishAllPorts": False,
+                "ReadonlyRootfs": True,
+                "Privileged": False,
+                "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+                "PidMode": "",
+                "IpcMode": "private",
+                "UsernsMode": "",
+                "CapDrop": ["ALL"],
+                "CapAdd": ["NET_BIND_SERVICE"],
+                "SecurityOpt": ["no-new-privileges=true"],
+                "Devices": [],
+                "DeviceRequests": None,
+                "Memory": 128 * 1024 * 1024,
+                "MemorySwap": 128 * 1024 * 1024,
+                "NanoCpus": 250_000_000,
+                "PidsLimit": 64,
+                "Tmpfs": dict.fromkeys(
+                    ("/config", "/data"),
+                    "rw,noexec,nosuid,nodev,size=8m,uid=1000,gid=1000,mode=0700",
+                ),
+                "LogConfig": {
+                    "Type": "local",
+                    "Config": {"max-file": "2", "max-size": "10m"},
+                },
+            },
+            "Mounts": [],
+            "NetworkSettings": {
+                "Networks": {values["network"]: {"NetworkID": self._network_id(values["network"])}}
             },
             "State": {"Running": False},
         }
@@ -110,9 +284,38 @@ class FakeDocker:
         self.events.append(("create-gateway", port))
         return ResourceRecord("container", values["name"], object_id)
 
+    @staticmethod
+    def validate_gateway_policy(
+        inspection: dict[str, Any],
+        *,
+        image: str,
+        network: str,
+        upstream_port: int,
+        host_port: int,
+    ) -> None:
+        Docker.validate_gateway_policy(
+            inspection,
+            image=image,
+            network=network,
+            upstream_port=upstream_port,
+            host_port=host_port,
+        )
+
     def connect_network(self, network: ResourceRecord, container: ResourceRecord) -> None:
         assert network.object_id in self.objects and container.object_id in self.objects
-        self.connections.append((network.object_id, container.object_id))
+        networks = self.objects[container.object_id]["NetworkSettings"]["Networks"]
+        if network.name not in networks:
+            networks[network.name] = {"NetworkID": network.object_id}
+            self.connections.append((network.object_id, container.object_id))
+
+    def network_connected(self, network: ResourceRecord, container: ResourceRecord) -> bool:
+        networks = self.objects[container.object_id]["NetworkSettings"]["Networks"]
+        attachment = networks.get(network.name)
+        if attachment is None:
+            return False
+        if attachment.get("NetworkID") != network.object_id:
+            raise PolicyError("network attachment identity differs from state")
+        return True
 
     def inspect(self, kind: str, object_id: str) -> dict[str, Any]:
         return self.objects[object_id]
@@ -130,8 +333,18 @@ class FakeDocker:
             raise PolicyError("ownership labels mismatch")
         return inspection
 
+    def read_logs(self, record: ResourceRecord, *, timeout: float, tail: int = 20) -> Result:
+        self.events.append(("seed-log", record.name))
+        output = f"{SEED_READY_MARKER}\n" if self.seeder_ready else "seeding\n"
+        return Result(("docker", "logs"), 0, output, "")
+
     def start(self, record: ResourceRecord) -> None:
-        self.objects[record.object_id]["State"]["Running"] = True
+        role = self._labels("container", self.objects[record.object_id]).get(
+            "org.vulndockyard.role"
+        )
+        self.objects[record.object_id]["State"]["Running"] = not (
+            role == "seeder" and self.seeder_exits
+        )
         self.events.append(("start", record.name))
 
     def stop(self, record: ResourceRecord) -> None:
@@ -158,7 +371,12 @@ class FakeDocker:
     def managed_resources(self, *, lab_id: str | None = None) -> dict[str, tuple[str, ...]]:
         result: dict[str, list[str]] = {"container": [], "network": [], "volume": []}
         for object_id, inspection in self.objects.items():
-            kind = "container" if "Config" in inspection else "network"
+            if "Config" in inspection:
+                kind = "container"
+            elif inspection.get("Driver") == "local":
+                kind = "volume"
+            else:
+                kind = "network"
             labels = self._labels(kind, inspection)
             if labels.get(OWNER) == "true" and (lab_id is None or labels.get(LAB) == lab_id):
                 result[kind].append(object_id)
@@ -207,7 +425,7 @@ def test_reference_lifecycle_is_idempotent_and_distinct(xdg_paths: Paths) -> Non
     assert started.state == "running"
     assert started.lock_match
     assert started.url == "http://juice-shop.test:18080"
-    assert len(started.resources) == 4
+    assert len(started.resources) == 8
     assert len(docker.pulls) == 2
     state = value.store.load(lab.manifest.id)
     assert state is not None
@@ -237,6 +455,141 @@ def test_reference_lifecycle_is_idempotent_and_distinct(xdg_paths: Paths) -> Non
     assert docker.objects == {}
 
 
+def test_reference_runtime_has_exact_bounded_storage_and_no_final_seeder(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    status = value.up(lab, host_port=18080)
+    state = value.store.load(lab.manifest.id)
+    assert state is not None
+
+    roles = {resource["role"] for resource in status.resources}
+    assert "seeder" not in roles
+    assert {role for role in roles if role.startswith("volume-")} == {
+        "volume-data",
+        "volume-ftp",
+        "volume-frontend",
+        "volume-csaf",
+    }
+    application = next(record for record in state.resources if record.name.endswith("-app"))
+    inspection = docker.objects[application.object_id]
+    assert inspection["HostConfig"]["ReadonlyRootfs"] is True
+    assert inspection["HostConfig"]["Tmpfs"] == {
+        mount.container_path: (
+            f"rw,noexec,nosuid,nodev,size={mount.size_mb}m,uid=65532,gid=65532,mode=0700"
+        )
+        for mount in lab.manifest.ephemeral_storage.empty
+    }
+    assert {(mount["Name"], mount["Destination"]) for mount in inspection["Mounts"]} == {
+        (
+            f"vdy-juice-shop-{state.run_id[:12]}-volume-{mount.name}",
+            mount.container_path,
+        )
+        for mount in lab.manifest.ephemeral_storage.seeded
+    }
+    assert all(
+        inspection["Config"]["Image"] != ""
+        for inspection in docker.objects.values()
+        if "Config" in inspection
+    )
+
+
+def test_stop_then_up_reseeds_tmpfs_without_recreating_volumes(xdg_paths: Paths) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    started = value.up(lab, host_port=18080)
+    first_seeders = [event for event in docker.events if event[0] == "create-seeder"]
+    first_volumes = [event for event in docker.events if event[0] == "create-volume"]
+
+    repeated = value.up(lab, host_port=18080)
+    assert repeated.run_id == started.run_id
+    assert [event for event in docker.events if event[0] == "create-seeder"] == first_seeders
+
+    assert value.stop(lab).state == "stopped"
+    resumed = value.up(lab, host_port=18080)
+    assert resumed.run_id == started.run_id
+    assert len([event for event in docker.events if event[0] == "create-seeder"]) == 2
+    assert [event for event in docker.events if event[0] == "create-volume"] == first_volumes
+    assert not any(resource["role"] == "seeder" for resource in resumed.resources)
+
+
+def test_unsafe_development_uses_same_seeding_path_with_untrusted_labels(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    image = "dev.example/app@sha256:" + "f" * 64
+    result = value.up(
+        lab,
+        host_port=18080,
+        unsafe_image=image,
+        unsafe_development=True,
+    )
+    assert result.trusted_run is False
+    assert ("create-seeder", image) in docker.events
+    for inspection in docker.objects.values():
+        labels = inspection["Config"]["Labels"] if "Config" in inspection else inspection["Labels"]
+        assert labels["org.vulndockyard.trusted"] == "false"
+
+
+def test_seeder_creation_failure_cleans_checkpointed_volumes_and_networks(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    docker.fail_seeder = True
+
+    with pytest.raises(PreflightError, match="seeder failure"):
+        value.up(lab, host_port=18080)
+
+    assert docker.objects == {}
+    assert value.store.load(lab.manifest.id) is None
+    assert len(docker.removed) == 6
+
+
+def test_seeder_without_exact_ready_marker_fails_and_cleans_exact_resources(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    docker.seeder_ready = False
+    docker.seeder_exits = True
+
+    with pytest.raises(PreflightError, match="exited before its exact readiness marker"):
+        value.up(lab, host_port=18080)
+
+    assert docker.objects == {}
+    assert value.store.load(lab.manifest.id) is None
+    assert len(docker.removed) == 7
+
+
+def test_old_engine_blocks_lab_execution_but_not_owned_cleanup(xdg_paths: Paths) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    state = value.store.load(lab.manifest.id)
+    assert state is not None
+    docker.engine_version = "27.5.1"
+
+    pulls_before = tuple(docker.pulls)
+    objects_before = set(docker.objects)
+    for operation in (
+        lambda: value.pull(lab),
+        lambda: value.up(lab, host_port=18080),
+        lambda: value.activate_reviewed_update(lab),
+        lambda: value.restart(lab),
+        lambda: value.rebuild(lab),
+        lambda: value.reset(lab),
+        lambda: value.verify(lab),
+    ):
+        with pytest.raises(PreflightError, match=r"28\.0\.0 or newer"):
+            operation()
+        assert tuple(docker.pulls) == pulls_before
+        assert set(docker.objects) == objects_before
+
+    # Stopping and exact-ID cleanup remain available as recovery operations.
+    assert value.stop(lab).state == "stopped"
+    assert value.residual_audit()["container"]
+    assert value.remove(lab).state == "absent"
+    assert value.purge(lab).state == "absent"
+    assert value.residual_audit() == {"container": (), "network": (), "volume": ()}
+
+
 def test_interrupted_startup_cleans_only_created_resources(xdg_paths: Paths) -> None:
     value, docker, lab = runtime(xdg_paths)
     docker.fail_gateway = True
@@ -244,7 +597,34 @@ def test_interrupted_startup_cleans_only_created_resources(xdg_paths: Paths) -> 
         value.up(lab, host_port=18080)
     assert docker.objects == {}
     assert value.store.load(lab.manifest.id) is None
-    assert len(docker.removed) == 3
+    assert len(docker.removed) == 8
+
+
+def test_startup_recovers_an_object_created_before_the_next_checkpoint(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    create_network = docker.create_network
+    interrupted = False
+
+    def create_then_interrupt(
+        name: str, ownership: Ownership, *, internal: bool = True
+    ) -> ResourceRecord:
+        nonlocal interrupted
+        record = create_network(name, ownership, internal=internal)
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return record
+
+    monkeypatch.setattr(docker, "create_network", create_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        value.up(lab, host_port=18080)
+
+    assert docker.objects == {}
+    assert value.store.load(lab.manifest.id) is None
+    assert len(docker.removed) == 1
 
 
 def test_reviewed_update_current_and_no_runtime_are_non_mutating(xdg_paths: Paths) -> None:
@@ -286,7 +666,7 @@ def test_cli_activates_only_installed_reviewed_candidate_after_readiness(
     assert active is not None and active.manifest_identity == lab.manifest_identity
     assert active.run_id != previous.run_id
     assert previous_ids.isdisjoint(docker.objects)
-    assert len(docker.objects) == 4
+    assert len(docker.objects) == 8
 
 
 def test_update_smokes_on_temporary_port_before_exact_gateway_cutover(
@@ -410,6 +790,56 @@ def test_next_lifecycle_command_rolls_back_an_interrupted_cutover(
     assert docker.ports.keys() == {18080}
 
 
+def test_next_lifecycle_adopts_an_exact_unjournaled_rollback_gateway(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    candidate = value._create_run(
+        lab,
+        host_port=28080,
+        selected_reference=lab.manifest.images[0].reference,
+        trusted=True,
+        persist=False,
+        coexisting=(previous,),
+    )
+    old_gateway = next(record for record in previous.resources if record.name.endswith("-gateway"))
+    ingress = next(record for record in previous.resources if record.name.endswith("-ingress"))
+    internal = next(record for record in previous.resources if record.name.endswith("-net"))
+    docker.remove(old_gateway)
+    replacement = docker.create_gateway(
+        name=old_gateway.name,
+        image=previous.gateway_reference,
+        network=ingress.name,
+        upstream_port=previous.upstream_port,
+        host_port=previous.host_port,
+        ownership=Ownership.from_state(previous),
+    )
+    value.store.save_update(
+        UpdateJournal(
+            1,
+            lab.manifest.id,
+            "cutover",
+            previous,
+            candidate,
+            ("application", "gateway"),
+            28080,
+        )
+    )
+
+    status = value.status(lab)
+
+    restored = value.store.load(lab.manifest.id)
+    assert restored is not None
+    assert status.run_id == previous.run_id
+    assert replacement in restored.resources
+    assert replacement.object_id in docker.objects
+    assert docker.ports == {18080: replacement.object_id}
+    assert (internal.object_id, replacement.object_id) in docker.connections
+    assert value.store.load_update(lab.manifest.id) is None
+
+
 def test_ready_journal_completes_cleanup_after_interruption(
     xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -437,7 +867,7 @@ def test_ready_journal_completes_cleanup_after_interruption(
     assert recovered.run_id == active.run_id
     assert recovered.lock_match
     assert value.store.load_update(lab.manifest.id) is None
-    assert len(docker.objects) == 4
+    assert len(docker.objects) == 8
 
 
 def test_cli_failed_candidate_restores_previous_runtime_and_discards_candidate(
@@ -554,6 +984,41 @@ def test_next_start_recovers_exact_owned_partial_checkpoint(xdg_paths: Paths) ->
     assert partial.object_id in docker.removed
 
 
+def test_next_start_adopts_resource_created_before_its_checkpoint(xdg_paths: Paths) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    ownership = Ownership(
+        lab.manifest.id,
+        lab.manifest_identity,
+        "a" * 32,
+        "2026-09-06T00:00:00Z",
+        True,
+    )
+    value.store.save(
+        RunState.create(
+            lab_id=lab.manifest.id,
+            run_id=ownership.run_id,
+            manifest_identity=lab.manifest_identity,
+            host_port=18080,
+            trusted=True,
+            requested_reference=lab.manifest.images[0].reference,
+            resolved_digest=lab.manifest.images[0].digest,
+            resources=(),
+            gateway_reference=lab.manifest.images[1].reference,
+            upstream_port=lab.manifest.services[0].internal_port,
+            created_at=ownership.created_at,
+        )
+    )
+    uncheckpointed = docker.create_network(
+        "vdy-juice-shop-aaaaaaaaaaaa-net", ownership, internal=True
+    )
+
+    recovered = value.up(lab, host_port=18080)
+
+    assert recovered.state == "running"
+    assert recovered.run_id != ownership.run_id
+    assert uncheckpointed.object_id in docker.removed
+
+
 def test_existing_state_requires_exact_ownership_and_manifest_identity(xdg_paths: Paths) -> None:
     value, docker, lab = runtime(xdg_paths)
     value.up(lab, host_port=18080)
@@ -574,10 +1039,11 @@ def test_cleanup_prevalidates_every_resource_before_removing_anything(xdg_paths:
     assert state is not None
     gateway = next(record for record in state.resources if record.name.endswith("-gateway"))
     docker.objects[gateway.object_id]["Name"] = "unrelated"
+    removed_before = tuple(docker.removed)
     with pytest.raises(PolicyError, match="name mismatch"):
         value.remove(lab)
-    assert docker.removed == []
-    assert len(docker.objects) == 4
+    assert tuple(docker.removed) == removed_before
+    assert len(docker.objects) == 8
     assert value.store.load(lab.manifest.id) == state
 
 
@@ -682,7 +1148,9 @@ def test_unsafe_override_never_inherits_trust(
 
 
 @pytest.mark.parametrize("role", ["application", "gateway"])
-def test_lock_match_checks_each_inspected_container_image(xdg_paths: Paths, role: str) -> None:
+def test_status_fails_closed_when_a_container_image_differs_from_lock(
+    xdg_paths: Paths, role: str
+) -> None:
     value, docker, lab = runtime(xdg_paths)
     value.up(lab, host_port=18080)
     state = value.store.load(lab.manifest.id)
@@ -700,7 +1168,8 @@ def test_lock_match_checks_each_inspected_container_image(xdg_paths: Paths, role
         "attacker.invalid/image@sha256:" + "9" * 64
     )
 
-    assert value.status(lab).lock_match is False
+    with pytest.raises(PolicyError, match="unexpected image"):
+        value.status(lab)
 
 
 def test_restart_and_rebuild_refuse_to_replace_preserved_old_lock(
@@ -736,13 +1205,14 @@ def test_rebuild_refuses_an_untrusted_reference_before_cleanup(xdg_paths: Paths)
     state = value.store.load(lab.manifest.id)
     assert state is not None
     ids_before = set(docker.objects)
+    removed_before = tuple(docker.removed)
 
     with pytest.raises(PolicyError, match="reference differs"):
         value.rebuild(lab)
 
     assert value.store.load(lab.manifest.id) == state
     assert set(docker.objects) == ids_before
-    assert docker.removed == []
+    assert tuple(docker.removed) == removed_before
 
 
 def test_pull_fails_before_docker_for_an_unsupported_host_architecture(xdg_paths: Paths) -> None:
@@ -754,6 +1224,17 @@ def test_pull_fails_before_docker_for_an_unsupported_host_architecture(xdg_paths
     unsupported = dataclasses.replace(lab, manifest=manifest)
     with pytest.raises(PreflightError, match="does not support linux/amd64"):
         value.pull(unsupported)
+    assert docker.pulls == []
+
+
+def test_pull_requires_reviewed_smoke_evidence_for_the_host_platform(xdg_paths: Paths) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    manifest = dataclasses.replace(lab.manifest, verification_platforms=("linux/arm64",))
+    unverified = dataclasses.replace(lab, manifest=manifest)
+
+    with pytest.raises(PreflightError, match="no reviewed smoke-test evidence for linux/amd64"):
+        value.pull(unverified)
+
     assert docker.pulls == []
 
 
@@ -876,7 +1357,7 @@ def test_runtime_pull_verify_open_and_residual_audit(
     audit = value.residual_audit()
     assert len(audit["container"]) == 2
     assert len(audit["network"]) == 2
-    assert audit["volume"] == ()
+    assert len(audit["volume"]) == 4
     value.stop(lab)
     with pytest.raises(PolicyError, match="not running"):
         value.verify(lab)
@@ -918,6 +1399,30 @@ def test_status_reports_partially_running_layout_as_degraded(xdg_paths: Paths) -
     docker.objects[application.object_id]["State"]["Running"] = False
 
     assert value.status(lab).state == "degraded"
+
+
+@pytest.mark.parametrize("role", ["application", "gateway"])
+def test_status_fails_closed_after_a_required_network_is_disconnected(
+    xdg_paths: Paths, role: str
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    state = value.store.load(lab.manifest.id)
+    assert state is not None
+    container = next(
+        record
+        for record in state.resources
+        if record.kind == "container"
+        and docker._labels(record.kind, docker.objects[record.object_id]).get(
+            "org.vulndockyard.role"
+        )
+        == role
+    )
+    networks = docker.objects[container.object_id]["NetworkSettings"]["Networks"]
+    networks.pop(next(name for name in networks if name.endswith("-net")))
+
+    with pytest.raises(PolicyError, match="lost its"):
+        value.status(lab)
 
 
 def test_acknowledged_required_egress_attaches_only_app_to_reviewed_ingress(

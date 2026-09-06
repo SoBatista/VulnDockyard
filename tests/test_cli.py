@@ -306,7 +306,13 @@ def test_provider_dispatch(
 
 class DoctorDocker:
     def preflight(self) -> dict[str, object]:
-        return {"engine": "26.1.5", "compose_v2": True}
+        return {
+            "engine": "28.1.1",
+            "engine_version": {"major": 28, "minor": 1, "patch": 1, "suffix": ""},
+            "minimum_engine": "28.0.0",
+            "isolated_networking": True,
+            "compose_v2": True,
+        }
 
 
 def test_doctor_success_and_repair_flag_parse(
@@ -319,6 +325,7 @@ def test_doctor_success_and_repair_flag_parse(
     assert cli.main(["doctor"]) == 0
     captured = capsys.readouterr()
     assert "PASS docker-engine" in captured.out
+    assert "PASS docker-engine-isolation" in captured.out
 
 
 def test_doctor_advisory_failures_do_not_fail(
@@ -328,7 +335,13 @@ def test_doctor_advisory_failures_do_not_fail(
 ) -> None:
     class NoComposeDocker:
         def preflight(self) -> dict[str, object]:
-            return {"engine": "26.1.5", "compose_v2": False}
+            return {
+                "engine": "28.1.1",
+                "engine_version": {"major": 28, "minor": 1, "patch": 1, "suffix": ""},
+                "minimum_engine": "28.0.0",
+                "isolated_networking": True,
+                "compose_v2": False,
+            }
 
     monkeypatch.setattr(cli, "Docker", NoComposeDocker)
     monkeypatch.setattr(cli, "port_available", lambda port: False)
@@ -336,6 +349,28 @@ def test_doctor_advisory_failures_do_not_fail(
     captured = capsys.readouterr()
     assert "WARN docker-compose-v2" in captured.out
     assert "WARN loopback-port-80" in captured.out
+
+
+def test_doctor_fails_when_engine_cannot_enforce_isolated_gateway_mode(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class OldDocker:
+        def preflight(self) -> dict[str, object]:
+            return {
+                "engine": "27.5.1",
+                "engine_version": {"major": 27, "minor": 5, "patch": 1, "suffix": ""},
+                "minimum_engine": "28.0.0",
+                "isolated_networking": False,
+                "compose_v2": True,
+            }
+
+    monkeypatch.setattr(cli, "Docker", OldDocker)
+    monkeypatch.setattr(cli, "port_available", lambda port: True)
+    assert cli.main(["doctor"]) == 5
+    captured = capsys.readouterr()
+    assert "FAIL docker-engine-isolation" in captured.err
 
 
 def test_doctor_repairs_only_stale_managed_hosts(

@@ -10,7 +10,7 @@ normal output excludes spoilers and flags. Stable exits are: 0 success, 2 usage,
 |---|---|
 | `help [COMMAND]` | Root or focused help. |
 | `version` | Canonical controller version. |
-| `doctor` | Python, Engine, Compose, loopback port, hosts, and XDG diagnostics. |
+| `doctor` | Python, parsed Engine version/isolation capability, Compose, loopback port, hosts, and XDG diagnostics. |
 | `list` / `search QUERY` | Reviewed catalogue search; optional synced Vulhub search. |
 | `info LAB` / `trust LAB` | Contract details and provenance limits. |
 | `pull LAB` | Pull only reviewed `name@sha256` references. |
@@ -49,7 +49,15 @@ preflight. Readiness uses Python's built-in bounded HTTP client, so no external
 `curl` or `wget` executable is required. Its effective deadline is the lower of
 `VDY_TIMEOUT_HEALTH` and the reviewed manifest timeout. `pull`, `up`, and update
 activation also fail before pulling when any required image omits the validated
-local `linux/amd64`, `linux/arm64`, or `linux/arm/v7` platform.
+local `linux/amd64`, `linux/arm64`, or `linux/arm/v7` platform. The same operations
+also require that exact local platform in the reviewed lock's smoke-test evidence;
+an advertised but unverified architecture is not runnable.
+
+Runnable lab execution requires Docker Engine 28.0.0 or newer so the internal
+application bridge can use isolated IPv4 gateway mode. `pull`, `up`, `update`,
+`restart`, `rebuild`, `reset`, and `verify` fail closed on an older or malformed
+server version. `stop`/`down`, `remove`, `purge`, and the residual-resource audit
+remain available for exact owned-resource recovery.
 
 `/etc/hosts` is the only privileged operation. Install the helper reported by
 `hosts helper` as `/usr/local/libexec/vulndockyard-hosts`, owned by `root:root`

@@ -13,8 +13,10 @@ Version: `1.0.0`
 
 ## Quick start
 
-Requires Python 3.11+ and Docker Engine. Docker Compose v2 is required only for
-reviewed multi-container adapters and provider development.
+Requires Python 3.11+ and Docker Engine 28.0.0 or newer. The minimum Engine
+version is a containment requirement for isolated bridge gateway mode, not only
+a compatibility preference. Docker Compose v2 is required only for reviewed
+multi-container adapters and provider development.
 
 ```bash
 python3 -m venv .venv

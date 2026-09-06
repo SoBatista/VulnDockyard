@@ -8,18 +8,24 @@ import pytest
 
 from vulndockyard.docker import (
     CREATED,
+    GATEWAY_MODE_IPV4,
     LAB,
     MANIFEST,
     MANIFEST_VERSION,
     OWNER,
     RUN,
+    SEED_READY_MARKER,
+    SEED_SCRIPT,
     TRUSTED,
     Docker,
     DockerConnection,
     Ownership,
     Timeouts,
+    engine_supports_isolated_networking,
+    parse_engine_version,
 )
 from vulndockyard.errors import IntegrityError, PolicyError, PreflightError
+from vulndockyard.models import EphemeralMount
 from vulndockyard.process import Result, Runner
 from vulndockyard.state import ResourceRecord
 
@@ -65,7 +71,11 @@ def fake_connection() -> DockerConnection:
 
 
 def labels(value: Ownership) -> dict[str, str]:
-    items = iter(value.labels("application"))
+    return role_labels(value, "application")
+
+
+def role_labels(value: Ownership, role: str) -> dict[str, str]:
+    items = iter(value.labels(role))
     result: dict[str, str] = {}
     for marker, assignment in zip(items, items, strict=True):
         assert marker == "--label"
@@ -74,8 +84,153 @@ def labels(value: Ownership) -> dict[str, str]:
     return result
 
 
+def network_inspection(
+    value: Ownership,
+    *,
+    name: str = "vdy-juice-shop-cccccccccccc-net",
+    object_id: str = "a" * 64,
+    internal: bool = True,
+    driver: str = "bridge",
+    options: dict[str, str] | None = None,
+) -> dict[str, object]:
+    raw = value.labels("network")
+    network_labels = {
+        raw[index + 1].split("=", 1)[0]: raw[index + 1].split("=", 1)[1]
+        for index in range(0, len(raw), 2)
+    }
+    if options is None:
+        options = {GATEWAY_MODE_IPV4: "isolated" if internal else "nat"}
+    return {
+        "Id": object_id,
+        "Name": name,
+        "Driver": driver,
+        "Scope": "local",
+        "Internal": internal,
+        "Attachable": False,
+        "ConfigOnly": False,
+        "EnableIPv6": False,
+        "Ingress": False,
+        "Options": options,
+        "Labels": network_labels,
+    }
+
+
+def gateway_inspection(
+    value: Ownership,
+    *,
+    name: str = "vdy-juice-shop-cccccccccccc-gateway",
+    object_id: str = "a" * 64,
+    image: str = "docker.io/library/caddy@sha256:" + "2" * 64,
+    network: str = "vdy-ingress",
+    upstream_port: int = 3000,
+    host_port: int = 8080,
+) -> dict[str, object]:
+    return {
+        "Id": object_id,
+        "Name": f"/{name}",
+        "Config": {
+            "Image": image,
+            "User": "1000:1000",
+            "Cmd": [
+                "caddy",
+                "reverse-proxy",
+                "--from",
+                ":8080",
+                "--to",
+                f"app:{upstream_port}",
+            ],
+            "Labels": role_labels(value, "gateway"),
+        },
+        "HostConfig": {
+            "NetworkMode": network,
+            "PortBindings": {"8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(host_port)}]},
+            "PublishAllPorts": False,
+            "ReadonlyRootfs": True,
+            "Privileged": False,
+            "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+            "PidMode": "",
+            "IpcMode": "private",
+            "UsernsMode": "",
+            "CapDrop": ["ALL"],
+            "CapAdd": ["NET_BIND_SERVICE"],
+            "SecurityOpt": ["no-new-privileges=true"],
+            "Devices": [],
+            "DeviceRequests": None,
+            "Memory": 128 * 1024 * 1024,
+            "MemorySwap": 128 * 1024 * 1024,
+            "NanoCpus": 250_000_000,
+            "PidsLimit": 64,
+            "Tmpfs": dict.fromkeys(
+                ("/config", "/data"),
+                "rw,noexec,nosuid,nodev,size=8m,uid=1000,gid=1000,mode=0700",
+            ),
+            "LogConfig": {
+                "Type": "local",
+                "Config": {"max-file": "2", "max-size": "10m"},
+            },
+        },
+        "Mounts": [],
+    }
+
+
+def application_inspection(
+    value: Ownership,
+    *,
+    name: str = "vdy-juice-shop-cccccccccccc-app",
+    object_id: str = "a" * 64,
+    image: str = "registry.example.test/app@sha256:" + "1" * 64,
+    network: str = "vdy-network",
+    memory_mb: int = 512,
+    cpus: float = 0.5,
+    pids: int = 256,
+    uid: int = 65532,
+    gid: int = 65532,
+    mounts: list[dict[str, object]] | None = None,
+    tmpfs: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return {
+        "Id": object_id,
+        "Name": f"/{name}",
+        "Config": {
+            "Image": image,
+            "User": f"{uid}:{gid}",
+            "Labels": role_labels(value, "application"),
+        },
+        "HostConfig": {
+            "NetworkMode": network,
+            "PortBindings": {},
+            "PublishAllPorts": False,
+            "ReadonlyRootfs": True,
+            "Privileged": False,
+            "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+            "PidMode": "",
+            "IpcMode": "private",
+            "UsernsMode": "",
+            "CapDrop": ["ALL"],
+            "CapAdd": None,
+            "SecurityOpt": ["no-new-privileges=true"],
+            "Devices": [],
+            "DeviceRequests": [],
+            "Memory": memory_mb * 1024 * 1024,
+            "MemorySwap": memory_mb * 1024 * 1024,
+            "NanoCpus": round(cpus * 1_000_000_000),
+            "PidsLimit": pids,
+            "Tmpfs": tmpfs or {},
+            "LogConfig": {
+                "Type": "local",
+                "Config": {"max-file": "2", "max-size": "10m"},
+            },
+        },
+        "Mounts": mounts or [],
+    }
+
+
 def test_application_command_has_containment_and_no_publication() -> None:
     runner = RecordingRunner()
+    runner.responses = [
+        Result(("docker",), 0, "a" * 64 + "\n", ""),
+        Result(("docker",), 0, json.dumps([application_inspection(ownership())]), ""),
+    ]
     docker = Docker(
         runner,
         Timeouts(),
@@ -88,16 +243,18 @@ def test_application_command_has_containment_and_no_publication() -> None:
         },
     )
     record = docker.create_application(
-        name="vdy-juice-app",
+        name="vdy-juice-shop-cccccccccccc-app",
         image="registry.example.test/app@sha256:" + "1" * 64,
         network="vdy-network",
         ownership=ownership(),
         memory_mb=512,
         cpus=0.5,
         pids=256,
-        read_only=False,
+        read_only=True,
+        storage_uid=65532,
+        storage_gid=65532,
     )
-    call = runner.calls[-1]
+    call = next(call for call in runner.calls if call[3:5] == ("container", "create"))
     assert record.object_id == "a" * 64
     assert call[:5] == (
         "docker",
@@ -112,6 +269,8 @@ def test_application_command_has_containment_and_no_publication() -> None:
     assert call[call.index("--security-opt") + 1] == "no-new-privileges=true"
     assert call[call.index("--memory") + 1] == "512m"
     assert call[call.index("--memory-swap") + 1] == "512m"
+    assert "--read-only" in call
+    assert call[call.index("--user") + 1] == "65532:65532"
     assert call[call.index("--log-driver") + 1] == "local"
     assert [call[index + 1] for index, value in enumerate(call) if value == "--log-opt"] == [
         "max-size=10m",
@@ -121,18 +280,256 @@ def test_application_command_has_containment_and_no_publication() -> None:
     assert runner.environments[-1] == fake_connection().environment()
 
 
-def test_gateway_command_binds_only_loopback_and_fixed_target() -> None:
+def test_application_command_mounts_only_exact_reviewed_writable_paths() -> None:
+    runner = RecordingRunner()
+    volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+    )
+    seeded = EphemeralMount("data", "/juice-shop/data", 64)
+    empty = EphemeralMount("tmp", "/tmp", 16)  # noqa: S108 - reviewed container path
+    inspection = application_inspection(
+        ownership(),
+        mounts=[
+            {
+                "Type": "volume",
+                "Name": volume.name,
+                "Destination": seeded.container_path,
+                "RW": True,
+            }
+        ],
+        tmpfs={
+            empty.container_path: ("rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700")
+        },
+    )
+    runner.responses = [
+        Result(("docker",), 0, "a" * 64 + "\n", ""),
+        Result(("docker",), 0, json.dumps([inspection]), ""),
+    ]
+    docker = Docker(runner, connection=fake_connection())
+
+    docker.create_application(
+        name="vdy-juice-shop-cccccccccccc-app",
+        image="registry.example.test/app@sha256:" + "1" * 64,
+        network="vdy-network",
+        ownership=ownership(),
+        memory_mb=512,
+        cpus=0.5,
+        pids=256,
+        read_only=True,
+        seeded_mounts=((volume, seeded),),
+        empty_mounts=(empty,),
+        storage_uid=65532,
+        storage_gid=65532,
+    )
+
+    call = next(call for call in runner.calls if call[3:5] == ("container", "create"))
+    assert call[call.index("--mount") + 1] == (
+        "type=volume,src=vdy-juice-shop-cccccccccccc-volume-data,dst=/juice-shop/data"
+    )
+    assert call[call.index("--tmpfs") + 1] == (
+        "/tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700"  # noqa: S108
+    )
+    assert "--read-only" in call
+    assert "--publish" not in call
+
+
+def test_application_policy_mismatch_removes_only_exact_validated_container() -> None:
+    inspection = application_inspection(ownership())
+    assert isinstance(inspection["HostConfig"], dict)
+    inspection["HostConfig"]["ReadonlyRootfs"] = False
+    runner = RecordingRunner()
+    runner.responses = [
+        Result(("docker",), 0, "a" * 64 + "\n", ""),
+        Result(("docker",), 0, json.dumps([inspection]), ""),
+    ]
+    docker = Docker(runner, connection=fake_connection())
+
+    with pytest.raises(PolicyError, match="unsafe core runtime"):
+        docker.create_application(
+            name="vdy-juice-shop-cccccccccccc-app",
+            image="registry.example.test/app@sha256:" + "1" * 64,
+            network="vdy-network",
+            ownership=ownership(),
+            memory_mb=512,
+            cpus=0.5,
+            pids=256,
+            read_only=True,
+            storage_uid=65532,
+            storage_gid=65532,
+        )
+
+    assert runner.calls[-1][3:] == ("container", "rm", "--force", "a" * 64)
+
+
+def test_application_policy_rejects_effective_containment_drift() -> None:
+    def validate(inspection: dict[str, object]) -> None:
+        Docker.validate_application_policy(
+            inspection,
+            image="registry.example.test/app@sha256:" + "1" * 64,
+            network="vdy-network",
+            memory_mb=512,
+            cpus=0.5,
+            pids=256,
+            seeded_mounts=(),
+            empty_mounts=(),
+            storage_uid=65532,
+            storage_gid=65532,
+        )
+
+    def rejected(
+        group: str,
+        key: str,
+        value: object,
+        message: str,
+        error: type[Exception] = PolicyError,
+    ) -> None:
+        inspection = application_inspection(ownership())
+        section = inspection[group]
+        assert isinstance(section, dict)
+        section[key] = value
+        with pytest.raises(error, match=message):
+            validate(inspection)
+
+    rejected("Config", "User", "0:0", "image or user")
+    rejected("HostConfig", "NetworkMode", "host", "core runtime")
+    rejected("HostConfig", "PidMode", "host", "host namespace")
+    rejected("HostConfig", "CapDrop", [], "capabilities")
+    rejected("HostConfig", "SecurityOpt", [], "no-new-privileges")
+    rejected("HostConfig", "Devices", [{}], "device access")
+    rejected("HostConfig", "Memory", 0, "resource limits")
+    rejected("HostConfig", "Tmpfs", {"/unreviewed": "rw"}, "tmpfs mounts")
+    rejected("HostConfig", "LogConfig", None, "log limits")
+
+    malformed_config = application_inspection(ownership())
+    malformed_config["Config"] = None
+    with pytest.raises(IntegrityError, match="inspection is malformed"):
+        validate(malformed_config)
+
+    malformed = application_inspection(ownership())
+    malformed["Mounts"] = ["not-an-object"]
+    with pytest.raises(IntegrityError, match="mount inspection"):
+        validate(malformed)
+
+    unreviewed = application_inspection(ownership())
+    unreviewed["Mounts"] = [{"Type": "bind", "Name": "host", "Destination": "/host", "RW": True}]
+    with pytest.raises(PolicyError, match="unreviewed filesystem mount"):
+        validate(unreviewed)
+
+    unexpected = application_inspection(ownership())
+    unexpected["Mounts"] = [{"Type": "volume", "Name": "other", "Destination": "/data", "RW": True}]
+    with pytest.raises(PolicyError, match="volume mounts differ"):
+        validate(unexpected)
+
+
+def test_seeded_volume_uses_exact_tmpfs_driver_options_and_identity() -> None:
+    value = ownership()
+    mount = EphemeralMount("data", "/juice-shop/data", 64)
+    name = "vdy-juice-shop-cccccccccccc-volume-data"
+    inspection = {
+        "Name": name,
+        "Driver": "local",
+        "Options": {
+            "type": "tmpfs",
+            "device": "tmpfs",
+            "o": "size=64m,uid=65532,gid=65532,mode=0700",
+        },
+        "Labels": role_labels(value, "volume-data"),
+    }
+    runner = RecordingRunner()
+    runner.responses = [
+        Result(("docker",), 0, f"{name}\n", ""),
+        Result(("docker",), 0, json.dumps([inspection]), ""),
+    ]
+    docker = Docker(runner, connection=fake_connection())
+
+    record = docker.create_ephemeral_volume(
+        name=name, mount=mount, ownership=value, uid=65532, gid=65532
+    )
+
+    assert record == ResourceRecord("volume", name, name)
+    create = runner.calls[0]
+    assert [create[index + 1] for index, item in enumerate(create) if item == "--opt"] == [
+        "type=tmpfs",
+        "device=tmpfs",
+        "o=size=64m,uid=65532,gid=65532,mode=0700",
+    ]
+
+
+def test_seeded_volume_policy_mismatch_removes_only_validated_volume() -> None:
+    value = ownership()
+    mount = EphemeralMount("data", "/juice-shop/data", 64)
+    name = "vdy-juice-shop-cccccccccccc-volume-data"
+    inspection = {
+        "Name": name,
+        "Driver": "local",
+        "Options": {"type": "tmpfs", "device": "tmpfs", "o": "size=65m"},
+        "Labels": role_labels(value, "volume-data"),
+    }
+    runner = RecordingRunner()
+    runner.responses = [
+        Result(("docker",), 0, f"{name}\n", ""),
+        Result(("docker",), 0, json.dumps([inspection]), ""),
+    ]
+    docker = Docker(runner, connection=fake_connection())
+
+    with pytest.raises(PolicyError, match="driver options"):
+        docker.create_ephemeral_volume(
+            name=name, mount=mount, ownership=value, uid=65532, gid=65532
+        )
+    assert runner.calls[-1][3:] == ("volume", "rm", name)
+
+
+def test_seeder_uses_locked_image_fixed_node_script_and_strict_containment() -> None:
     runner = RecordingRunner()
     docker = Docker(runner, connection=fake_connection())
+    volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+    )
+    mount = EphemeralMount("data", "/juice-shop/data", 64)
+    image = "registry.example.test/app@sha256:" + "1" * 64
+
+    docker.create_seeder(
+        name="vdy-juice-shop-cccccccccccc-seeder",
+        image=image,
+        ownership=ownership(),
+        seeded_mounts=((volume, mount),),
+        uid=65532,
+        gid=65532,
+    )
+
+    call = runner.calls[-1]
+    assert call[call.index("--network") + 1] == "none"
+    assert call[call.index("--user") + 1] == "65532:65532"
+    assert call[call.index("--entrypoint") + 1] == "/nodejs/bin/node"
+    assert call[-4:] == (image, "-e", SEED_SCRIPT, call[-1])
+    assert json.loads(call[-1]) == [{"source": "/juice-shop/data", "target": "/vdy-seed/data"}]
+    assert SEED_READY_MARKER in SEED_SCRIPT
+    assert "--read-only" in call
+    assert call[call.index("--cap-drop") + 1] == "ALL"
+    assert call[call.index("--security-opt") + 1] == "no-new-privileges=true"
+    assert "--privileged" not in call
+
+
+def test_gateway_command_binds_only_loopback_and_fixed_target() -> None:
+    runner = RecordingRunner()
+    runner.responses = [
+        Result(("docker",), 0, "a" * 64 + "\n", ""),
+        Result(("docker",), 0, json.dumps([gateway_inspection(ownership())]), ""),
+    ]
+    docker = Docker(runner, connection=fake_connection())
     docker.create_gateway(
-        name="vdy-gateway",
+        name="vdy-juice-shop-cccccccccccc-gateway",
         image="docker.io/library/caddy@sha256:" + "2" * 64,
         network="vdy-ingress",
         upstream_port=3000,
         host_port=8080,
         ownership=ownership(),
     )
-    call = runner.calls[-1]
+    call = next(call for call in runner.calls if call[3:5] == ("container", "create"))
     assert call[call.index("--publish") + 1] == "127.0.0.1:8080:8080"
     assert call[call.index("--user") + 1] == "1000:1000"
     assert call[call.index("--cap-add") + 1] == "NET_BIND_SERVICE"
@@ -158,11 +555,77 @@ def test_gateway_command_binds_only_loopback_and_fixed_target() -> None:
         )
 
 
+def test_gateway_policy_mismatch_removes_only_exact_validated_container() -> None:
+    inspection = gateway_inspection(ownership())
+    assert isinstance(inspection["HostConfig"], dict)
+    inspection["HostConfig"]["PortBindings"] = {
+        "8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8080"}]  # noqa: S104
+    }
+    runner = RecordingRunner()
+    runner.responses = [
+        Result(("docker",), 0, "a" * 64 + "\n", ""),
+        Result(("docker",), 0, json.dumps([inspection]), ""),
+    ]
+    docker = Docker(runner, connection=fake_connection())
+    with pytest.raises(PolicyError, match="exact loopback"):
+        docker.create_gateway(
+            name="vdy-juice-shop-cccccccccccc-gateway",
+            image="docker.io/library/caddy@sha256:" + "2" * 64,
+            network="vdy-ingress",
+            upstream_port=3000,
+            host_port=8080,
+            ownership=ownership(),
+        )
+    assert runner.calls[-1][3:] == ("container", "rm", "--force", "a" * 64)
+
+
+def test_gateway_policy_rejects_effective_containment_drift() -> None:
+    def validate(inspection: dict[str, object]) -> None:
+        Docker.validate_gateway_policy(
+            inspection,
+            image="docker.io/library/caddy@sha256:" + "2" * 64,
+            network="vdy-ingress",
+            upstream_port=3000,
+            host_port=8080,
+        )
+
+    def rejected(group: str, key: str, value: object, message: str) -> None:
+        inspection = gateway_inspection(ownership())
+        section = inspection[group]
+        assert isinstance(section, dict)
+        section[key] = value
+        with pytest.raises(PolicyError, match=message):
+            validate(inspection)
+
+    rejected("Config", "Cmd", ["sh"], "image, user, or command")
+    rejected("HostConfig", "NetworkMode", "host", "core runtime")
+    rejected("HostConfig", "IpcMode", "host", "host namespace")
+    rejected("HostConfig", "CapAdd", ["SYS_ADMIN"], "capabilities")
+    rejected("HostConfig", "SecurityOpt", [], "no-new-privileges")
+    rejected("HostConfig", "DeviceRequests", [{}], "device access")
+    rejected("HostConfig", "PidsLimit", 0, "resource limits")
+    rejected("HostConfig", "Tmpfs", {}, "filesystem mounts")
+    rejected("HostConfig", "LogConfig", None, "log limits")
+
+    malformed = gateway_inspection(ownership())
+    malformed["Mounts"] = None
+    with pytest.raises(IntegrityError, match="inspection is malformed"):
+        validate(malformed)
+
+
 def test_network_and_cleanup_commands_are_scoped() -> None:
     runner = RecordingRunner()
+    value = ownership()
+    name = "vdy-juice-shop-cccccccccccc-net"
+    runner.responses = [
+        Result(("docker",), 0, "a" * 64 + "\n", ""),
+        Result(("docker",), 0, json.dumps([network_inspection(value)]), ""),
+    ]
     docker = Docker(runner, connection=fake_connection())
-    network = docker.create_network("vdy-net", ownership(), internal=True)
-    assert "--internal" in runner.calls[-1]
+    network = docker.create_network(name, value, internal=True)
+    create_call = next(call for call in runner.calls if call[3:5] == ("network", "create"))
+    assert "--internal" in create_call
+    assert create_call[create_call.index("--opt") + 1] == f"{GATEWAY_MODE_IPV4}=isolated"
     docker.remove(ResourceRecord("container", "app", "d" * 64))
     assert runner.calls[-1] == (
         "docker",
@@ -183,6 +646,82 @@ def test_network_and_cleanup_commands_are_scoped() -> None:
         "a" * 64,
     ]
     assert all("prune" not in call for argv in runner.calls for call in argv)
+
+
+def test_ingress_network_has_explicit_nat_mode_and_no_internal_flag() -> None:
+    value = ownership()
+    name = "vdy-juice-shop-cccccccccccc-ingress"
+    inspection = network_inspection(value, name=name, internal=False)
+    runner = RecordingRunner()
+    runner.responses = [
+        Result(("docker",), 0, "a" * 64 + "\n", ""),
+        Result(("docker",), 0, json.dumps([inspection]), ""),
+    ]
+    docker = Docker(runner, connection=fake_connection())
+    assert docker.create_network(name, value, internal=False).object_id == "a" * 64
+    create_call = next(call for call in runner.calls if call[3:5] == ("network", "create"))
+    assert "--internal" not in create_call
+    assert create_call[create_call.index("--opt") + 1] == f"{GATEWAY_MODE_IPV4}=nat"
+
+
+@pytest.mark.parametrize(
+    ("internal", "inspection", "message"),
+    (
+        (True, network_inspection(ownership(), driver="overlay"), "bridge driver"),
+        (
+            True,
+            network_inspection(ownership(), internal=False, options={}),
+            "Internal setting",
+        ),
+        (
+            True,
+            network_inspection(ownership(), options={GATEWAY_MODE_IPV4: "nat"}),
+            "driver options",
+        ),
+        (
+            False,
+            network_inspection(
+                ownership(),
+                name="vdy-juice-shop-cccccccccccc-ingress",
+                internal=False,
+                options={GATEWAY_MODE_IPV4: "routed"},
+            ),
+            "driver options",
+        ),
+        (
+            True,
+            {**network_inspection(ownership()), "Attachable": True},
+            "unsafe scope or mode flags",
+        ),
+    ),
+)
+def test_new_network_policy_mismatch_removes_only_the_validated_object(
+    internal: bool, inspection: dict[str, object], message: str
+) -> None:
+    runner = RecordingRunner()
+    runner.responses = [
+        Result(("docker",), 0, "a" * 64 + "\n", ""),
+        Result(("docker",), 0, json.dumps([inspection]), ""),
+    ]
+    docker = Docker(runner, connection=fake_connection())
+    with pytest.raises(PolicyError, match=message):
+        docker.create_network(str(inspection["Name"]), ownership(), internal=internal)
+    assert runner.calls[-1][3:] == ("network", "rm", "a" * 64)
+
+
+def test_new_network_with_unexpected_ownership_is_not_removed() -> None:
+    inspection = network_inspection(ownership())
+    assert isinstance(inspection["Labels"], dict)
+    inspection["Labels"][OWNER] = "false"
+    runner = RecordingRunner()
+    runner.responses = [
+        Result(("docker",), 0, "a" * 64 + "\n", ""),
+        Result(("docker",), 0, json.dumps([inspection]), ""),
+    ]
+    docker = Docker(runner, connection=fake_connection())
+    with pytest.raises(PolicyError, match="ownership labels mismatch"):
+        docker.create_network(str(inspection["Name"]), ownership(), internal=True)
+    assert not any(call[3:5] == ("network", "rm") for call in runner.calls)
 
 
 def test_pull_requires_digest_and_verifies_repository_identity() -> None:
@@ -277,14 +816,17 @@ def test_remaining_bounded_docker_operations_construct_exact_argv(
 ) -> None:
     runner = RecordingRunner()
     runner.responses = [
-        Result(("docker",), 0, '"26.1.5"\n', ""),
+        Result(("docker",), 0, '"28.1.5+ubuntu"\n', ""),
         Result(("docker",), 0, "2.40.0\n", ""),
     ]
     docker = Docker(runner, Timeouts(stop=2), connection=fake_connection())
     monkeypatch.setattr("vulndockyard.docker.platform.system", lambda: "Linux")
     monkeypatch.setattr("vulndockyard.docker.platform.machine", lambda: "x86_64")
     assert docker.preflight() == {
-        "engine": "26.1.5",
+        "engine": "28.1.5+ubuntu",
+        "engine_version": {"major": 28, "minor": 1, "patch": 5, "suffix": "+ubuntu"},
+        "minimum_engine": "28.0.0",
+        "isolated_networking": True,
         "compose_v2": True,
         "platform": "linux/amd64",
     }
@@ -316,6 +858,80 @@ def test_remaining_bounded_docker_operations_construct_exact_argv(
         "d" * 64,
     ) in runner.calls
     assert not any("system" in call for argv in runner.calls for call in argv)
+
+
+def test_network_attachment_inspection_is_exact_and_fail_closed() -> None:
+    runner = RecordingRunner()
+    docker = Docker(runner, connection=fake_connection())
+    network = ResourceRecord("network", "vdy-net", "e" * 64)
+    container = ResourceRecord("container", "vdy-app", "d" * 64)
+
+    runner.responses = [
+        Result(
+            ("docker",),
+            0,
+            json.dumps(
+                [
+                    {
+                        "NetworkSettings": {
+                            "Networks": {network.name: {"NetworkID": network.object_id}}
+                        }
+                    }
+                ]
+            ),
+            "",
+        )
+    ]
+    assert docker.network_connected(network, container)
+
+    runner.responses = [
+        Result(
+            ("docker",),
+            0,
+            json.dumps([{"NetworkSettings": {"Networks": {}}}]),
+            "",
+        )
+    ]
+    assert not docker.network_connected(network, container)
+
+    runner.responses = [
+        Result(
+            ("docker",),
+            0,
+            json.dumps(
+                [{"NetworkSettings": {"Networks": {network.name: {"NetworkID": "f" * 64}}}}]
+            ),
+            "",
+        )
+    ]
+    with pytest.raises(PolicyError, match="attachment identity differs"):
+        docker.network_connected(network, container)
+
+    runner.responses = [Result(("docker",), 0, json.dumps([{}]), "")]
+    with pytest.raises(IntegrityError, match="network inspection is malformed"):
+        docker.network_connected(network, container)
+
+
+@pytest.mark.parametrize(
+    ("value", "parsed", "supported"),
+    (
+        ("27.5.1", ((27, 5, 1), ""), False),
+        ("28.0.0", ((28, 0, 0), ""), True),
+        ("28.0.0-rc.1", ((28, 0, 0), "-rc.1"), False),
+        ("28.0.1-1~debian.12", ((28, 0, 1), "-1~debian.12"), True),
+    ),
+)
+def test_engine_version_is_parsed_and_compared_without_lexical_ordering(
+    value: str, parsed: tuple[tuple[int, int, int], str], supported: bool
+) -> None:
+    assert parse_engine_version(value) == parsed
+    assert engine_supports_isolated_networking(value) is supported
+
+
+@pytest.mark.parametrize("value", (None, 28, "28", "v28.0.0", "28.0.0.1", "28.00.0"))
+def test_engine_version_parser_rejects_ambiguous_values(value: object) -> None:
+    with pytest.raises(IntegrityError, match="Engine server version"):
+        parse_engine_version(value)
 
 
 def test_inspection_and_preflight_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:

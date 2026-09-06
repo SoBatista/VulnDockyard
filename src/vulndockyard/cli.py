@@ -278,6 +278,18 @@ def _doctor(paths: Paths, hosts_manager: HostsManager | None = None) -> dict[str
         )
         checks.append(
             {
+                "name": "docker-engine-isolation",
+                "ok": detail.get("isolated_networking") is True,
+                "required": True,
+                "detail": {
+                    "server": detail["engine"],
+                    "parsed": detail.get("engine_version"),
+                    "minimum": detail.get("minimum_engine"),
+                },
+            }
+        )
+        checks.append(
+            {
                 "name": "docker-compose-v2",
                 "ok": bool(detail["compose_v2"]),
                 "required": False,
@@ -286,6 +298,14 @@ def _doctor(paths: Paths, hosts_manager: HostsManager | None = None) -> dict[str
         )
     except VulnDockyardError as exc:
         checks.append({"name": "docker-engine", "ok": False, "required": True, "detail": str(exc)})
+        checks.append(
+            {
+                "name": "docker-engine-isolation",
+                "ok": False,
+                "required": True,
+                "detail": "not checked",
+            }
+        )
         checks.append(
             {
                 "name": "docker-compose-v2",
