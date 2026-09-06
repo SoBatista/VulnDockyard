@@ -167,7 +167,54 @@ def _record_final_residual_audit(report: dict[str, Any]) -> bool:
     return all(not identifiers for identifiers in inventory.values())
 
 
+def _refresh_checkpoint_status(report: dict[str, Any]) -> None:
+    """Keep local-gate and full-release readiness explicit in every checkpoint."""
+    local_result = str(report.get("result", "running"))
+    blockers: list[dict[str, str]] = []
+    for gate in report.get("gates", []):
+        if not isinstance(gate, dict) or gate.get("result") == "pass":
+            continue
+        blockers.append(
+            {
+                "scope": "local",
+                "gate": str(gate.get("name", "unknown")),
+                "result": str(gate.get("result", "unknown")),
+                "reason": str(gate.get("reason", "required local gate did not pass")),
+            }
+        )
+    residual = report.get("residual_docker_resources")
+    if isinstance(residual, dict) and any(residual.values()):
+        blockers.append(
+            {
+                "scope": "local",
+                "gate": "final-residual-docker-resource-audit",
+                "result": "fail",
+                "reason": json.dumps(residual, sort_keys=True, separators=(",", ":")),
+            }
+        )
+    for gate in report.get("remote_bootstrap_gates", []):
+        if (
+            not isinstance(gate, dict)
+            or gate.get("required_before_release") is not True
+            or gate.get("result") == "pass"
+        ):
+            continue
+        blockers.append(
+            {
+                "scope": "remote",
+                "gate": str(gate.get("gate", "unknown")),
+                "result": str(gate.get("result", "unknown")),
+                "reason": str(gate.get("reason", "required remote gate did not pass")),
+            }
+        )
+    report["result_scope"] = "locally-applicable-gates"
+    report["local_result"] = local_result
+    report["blockers"] = blockers
+    report["release_ready"] = local_result == "pass" and not blockers
+
+
 def _checkpoint(report: dict[str, Any]) -> None:
+    _refresh_checkpoint_status(report)
     artifact_root = ROOT / "artifacts"
     artifact_root.mkdir(mode=0o700, exist_ok=True)
     temporary = artifact_root / ".checkpoint.json.tmp"
@@ -273,6 +320,11 @@ def _phases() -> tuple[Phase, ...]:
     return (
         Phase("version-consistency", (python, "scripts/check_version.py"), 30),
         Phase(
+            "installed-environment-dependency-check",
+            (python, "scripts/check_environment.py"),
+            30,
+        ),
+        Phase(
             "formatting", (python, "-m", "ruff", "format", "--check", "src", "tests", "scripts"), 30
         ),
         Phase("lint", (python, "-m", "ruff", "check", "src", "tests", "scripts"), 60),
@@ -354,7 +406,7 @@ def _initialization_failure_report(
 ) -> dict[str, Any]:
     skip_reason = f"not run because self-test initialization failed: {reason}"
     finished_at = datetime.now(UTC)
-    return {
+    report: dict[str, Any] = {
         "schema_version": 1,
         "version": version,
         "commit": commit,
@@ -371,6 +423,8 @@ def _initialization_failure_report(
         "residual_docker_resources": {"audit_error": [skip_reason]},
         "remote_bootstrap_gates": _remote_bootstrap_gates(),
     }
+    _refresh_checkpoint_status(report)
+    return report
 
 
 def main() -> int:
@@ -420,6 +474,7 @@ def main() -> int:
         "residual_docker_resources": None,
         "remote_bootstrap_gates": _remote_bootstrap_gates(),
     }
+    _refresh_checkpoint_status(report)
     ACTIVE_REPORT = report
     _checkpoint(report)
     failed = False

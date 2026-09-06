@@ -18,7 +18,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.check_version import authoritative_version  # noqa: E402
+from scripts.check_version import (  # noqa: E402
+    authoritative_version,
+    release_changelog_notes,
+    target_changelog_notes,
+)
 from scripts.generate_sbom import generate as generate_sbom  # noqa: E402
 
 
@@ -102,23 +106,10 @@ def _build_once(archive: bytes, destination: Path, epoch: int) -> dict[str, str]
 
 def changelog_notes(version: str) -> str:
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    import re
-
-    match = re.search(
-        rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}\n(?P<body>.*?)(?=^## |\Z)",
-        text,
-        flags=re.MULTILINE | re.DOTALL,
-    )
-    if match is None:
-        match = re.search(
-            rf"^## \[Unreleased\]\n\nTarget release: {re.escape(version)} "
-            r"\(not yet released\)\.\n(?P<body>.*?)(?=^## |\Z)",
-            text,
-            flags=re.MULTILINE | re.DOTALL,
-        )
-    if match is None or not match.group("body").strip():
-        raise RuntimeError(f"changelog has no release or target notes for {version}")
-    return match.group("body").strip() + "\n"
+    try:
+        return release_changelog_notes(version, text)
+    except RuntimeError:
+        return target_changelog_notes(version, text)
 
 
 def build(output: Path) -> dict[str, str]:

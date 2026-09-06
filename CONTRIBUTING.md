@@ -34,7 +34,9 @@ The complete self-test runs real digest-pinned Docker smoke tests and requires a
 available loopback port. Use focused unit commands while iterating; do not mark a
 release ready until every locally applicable required phase passes. The checkpoint
 keeps remote-only release gates as explicit unverified skips until their documented
-bootstrap point.
+bootstrap point. Its `local_result` and `result_scope` fields describe only the
+local gate, while `release_ready` and `blockers` prevent a local pass from being
+interpreted as publication authorization.
 
 The test gate enforces 85% branch-aware controller coverage. The only configured
 line exclusions are type-checking-only branches and direct `__main__` launch

@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.check_version import check as check_version_projections  # noqa: E402
+from scripts.check_version import validate_bootstrap_notes_moved  # noqa: E402
 
 LABELS = {"release:major", "release:minor", "release:patch"}
 ASSIGNMENT = re.compile(rb'^__version__ = "([^"]+)"$', re.MULTILINE)
@@ -78,18 +79,28 @@ def _bootstrap_release_is_ancestor(base_sha: str) -> bool:
     return relation.returncode == 0
 
 
-def _base_changelog_has_bootstrap_release(base_sha: str) -> bool:
+def _base_changelog(base_sha: str) -> str:
     result = subprocess.run(  # noqa: S603 - validated SHA, fixed git subcommand
         (_executable("git"), "show", f"{base_sha}:CHANGELOG.md"),
         cwd=ROOT,
         capture_output=True,
         check=False,
+        text=True,
         timeout=10,
     )
     if result.returncode != 0:
         raise RuntimeError("could not inspect the base changelog release state")
+    return result.stdout
+
+
+def _base_changelog_has_bootstrap_release(base_sha: str) -> bool:
     return (
-        re.search(rb"^## \[1\.0\.0\] - \d{4}-\d{2}-\d{2}$", result.stdout, re.MULTILINE) is not None
+        re.search(
+            r"^## \[1\.0\.0\] - \d{4}-\d{2}-\d{2}$",
+            _base_changelog(base_sha),
+            re.MULTILINE,
+        )
+        is not None
     )
 
 
@@ -171,6 +182,17 @@ def check() -> None:
         if _base_changelog_has_bootstrap_release(base_sha):
             raise RuntimeError(
                 "released v1.0.0 tag is missing or is not an ancestor of the pull-request base"
+            )
+        current_changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        if re.search(
+            r"^## \[1\.0\.0\] - \d{4}-\d{2}-\d{2}$",
+            current_changelog,
+            re.MULTILINE,
+        ):
+            validate_bootstrap_notes_moved(
+                _base_changelog(base_sha),
+                current_changelog,
+                "1.0.0",
             )
         return
     selected = _live_labels() & LABELS

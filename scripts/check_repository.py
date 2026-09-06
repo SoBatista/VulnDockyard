@@ -71,6 +71,7 @@ TRUSTED_PRECOMMIT = {
     "https://github.com/astral-sh/ruff-pre-commit": "1f1e8bf348ff38fc88619a38d3ca4d9c56abea49",
     "https://github.com/pre-commit/pre-commit-hooks": "3e8a8703264a2f4a69428a0aa4dcb512790b2c8c",
 }
+CONTRIBUTOR_COVENANT_21_SHA256 = "23a6b35a691158ebdd4b6fc885a541ac26988042201b7adac550da69c28477db"
 
 
 def tracked_files() -> tuple[Path, ...]:
@@ -215,9 +216,21 @@ def _dependency_lock_failures() -> list[str]:
     return failures
 
 
+def _contributor_covenant_failures(path: Path) -> list[str]:
+    if not path.is_file() or path.is_symlink():
+        return ["CODE_OF_CONDUCT.md must be a regular file"]
+    if hashlib.sha256(path.read_bytes()).hexdigest() != CONTRIBUTOR_COVENANT_21_SHA256:
+        return [
+            "CODE_OF_CONDUCT.md must match the reviewed complete Contributor Covenant 2.1 "
+            "text with only the SECURITY.md enforcement-contact adaptation"
+        ]
+    return []
+
+
 def check() -> None:
     failures: list[str] = []
     failures.extend(_dependency_lock_failures())
+    failures.extend(_contributor_covenant_failures(ROOT / "CODE_OF_CONDUCT.md"))
     files = tracked_files()
     if not files:
         failures.append("repository has no tracked files")

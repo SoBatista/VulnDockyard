@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import shutil
+import subprocess
 import sys
 import tomllib
 from datetime import date
@@ -12,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+LINK_DEFINITION = re.compile(r"^\[[^\]\n]+\]:\s+\S", re.MULTILINE)
 
 
 def authoritative_version() -> str:
@@ -22,6 +25,103 @@ def authoritative_version() -> str:
     if len(matches) != 1 or SEMVER.fullmatch(matches[0]) is None:
         raise RuntimeError("_version.py must contain one stable SemVer assignment")
     return str(matches[0])
+
+
+def _changelog_section(changelog: str, heading: re.Pattern[str]) -> str:
+    matches = list(heading.finditer(changelog))
+    if len(matches) != 1:
+        raise RuntimeError("changelog must contain exactly one matching section")
+    start = matches[0].end()
+    tail = changelog[start:]
+    boundaries = [
+        match.start()
+        for pattern in (re.compile(r"^## ", re.MULTILINE), LINK_DEFINITION)
+        if (match := pattern.search(tail)) is not None
+    ]
+    body = tail[: min(boundaries)] if boundaries else tail
+    normalized = body.strip()
+    return normalized + "\n" if normalized else ""
+
+
+def target_changelog_notes(version: str, changelog: str) -> str:
+    body = _changelog_section(
+        changelog,
+        re.compile(r"^## \[Unreleased\]\s*$", re.MULTILINE),
+    )
+    declaration = f"Target release: {version} (not yet released)."
+    if not body.startswith(declaration):
+        raise RuntimeError("unreleased changelog section lacks the exact target declaration")
+    notes = body[len(declaration) :].strip()
+    if not notes:
+        raise RuntimeError(f"changelog has no target notes for {version}")
+    return notes + "\n"
+
+
+def release_changelog_notes(version: str, changelog: str) -> str:
+    notes = _changelog_section(
+        changelog,
+        re.compile(
+            rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}\s*$",
+            re.MULTILINE,
+        ),
+    )
+    if not notes:
+        raise RuntimeError(f"changelog has no release notes for {version}")
+    return notes
+
+
+def validate_bootstrap_notes_moved(base: str, current: str, version: str) -> None:
+    expected = target_changelog_notes(version, base)
+    actual = release_changelog_notes(version, current)
+    if actual != expected:
+        raise RuntimeError(
+            f"bootstrap release {version} must move the complete Unreleased notes intact"
+        )
+    unreleased = _changelog_section(
+        current,
+        re.compile(r"^## \[Unreleased\]\s*$", re.MULTILINE),
+    )
+    if unreleased:
+        raise RuntimeError("bootstrap release must leave the Unreleased section empty")
+
+
+def _validate_bootstrap_notes_from_history(version: str, current: str) -> None:
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError("required executable is unavailable: git")
+    history = subprocess.run(  # noqa: S603 - fixed local history inspection
+        (git, "log", "--first-parent", "--format=%H", "HEAD^", "--", "CHANGELOG.md"),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    ).stdout.splitlines()
+    if len(history) > 500:
+        raise RuntimeError("bootstrap changelog history exceeds the 500-commit review bound")
+    declaration = f"Target release: {version} (not yet released)."
+    for commit in history:
+        if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+            raise RuntimeError("bootstrap changelog history returned a malformed commit")
+        candidate = subprocess.run(  # noqa: S603 - validated commit, fixed Git arguments
+            (git, "show", f"{commit}:CHANGELOG.md"),
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+        if declaration in candidate:
+            validate_bootstrap_notes_moved(candidate, current, version)
+            return
+    raise RuntimeError("could not find the reviewed bootstrap target notes in Git history")
+
+
+def _categorized(notes: str) -> bool:
+    return (
+        re.search(r"^### \S", notes, flags=re.MULTILINE) is not None
+        and re.search(r"^- \S", notes, flags=re.MULTILINE) is not None
+    )
 
 
 def _projection_state(version: str, readme: str, changelog: str) -> str:
@@ -39,16 +139,15 @@ def _projection_state(version: str, readme: str, changelog: str) -> str:
         )
     )
     release_heading = release_headings[0] if len(release_headings) == 1 else None
-    release_body = ""
-    if release_heading is not None:
-        start = release_heading.end()
-        next_heading = re.search(r"^## ", changelog[start:], flags=re.MULTILINE)
-        end = start + next_heading.start() if next_heading is not None else len(changelog)
-        release_body = changelog[start:end]
-    released_notes = (
-        re.search(r"^### \S", release_body, flags=re.MULTILINE) is not None
-        and re.search(r"^- \S", release_body, flags=re.MULTILINE) is not None
-    )
+    try:
+        target_notes = target_changelog_notes(version, changelog)
+    except RuntimeError:
+        target_notes = ""
+    try:
+        release_body = release_changelog_notes(version, changelog)
+    except RuntimeError:
+        release_body = ""
+    released_notes = _categorized(release_body)
     released_links = all(
         changelog.count(expected) == 1
         for expected in (
@@ -62,6 +161,7 @@ def _projection_state(version: str, readme: str, changelog: str) -> str:
         and released_badge not in readme
         and released_declaration not in readme
         and changelog.count(target_changelog_declaration) == 1
+        and _categorized(target_notes)
         and release_heading is None
         and changelog.count(unreleased_target_link) == 1
         and f"[{version}]:" not in changelog
@@ -158,6 +258,11 @@ def check_release_ready() -> str:
     )
     if state != "released":
         raise RuntimeError(f"version {version} is an unreleased target, not publication-ready")
+    if version == "1.0.0":
+        _validate_bootstrap_notes_from_history(
+            version,
+            (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"),
+        )
     return version
 
 

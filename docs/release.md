@@ -17,14 +17,18 @@ Before publication, run `scripts/self-test.sh` from a clean committed tree. It
 uses bounded per-phase and overall watchdogs and writes
 `artifacts/checkpoint.json`. Locally applicable required gates cannot be skipped;
 remote-only gates remain explicitly recorded as unverified skips until their
-documented bootstrap point. The suite compares two builds, installs from a
+documented bootstrap point. In that machine contract, `result` is a backwards-
+compatible alias of `local_result`, `result_scope` is
+`locally-applicable-gates`, and `release_ready` remains false while any required
+local or remote gate appears in `blockers`. A local pass therefore cannot be
+mistaken for authorization to publish. The suite compares two builds, installs from a
 tracked-files-only release shape into a clean venv,
 generates an SPDX package SBOM with explicit `DEPENDS_ON` relationships for exact
 runtime requirements and validates it with the pinned official SPDX tool, scans both
 the tracked release tree and all reachable Git
 history with the checksum-pinned Gitleaks binary, runs the real digest-pinned
-adapter smoke, and audits residual Docker resources. Build, CI, and verification
-development, build, CI, and verification environments install the complete dependency
+adapter smoke, and audits residual Docker resources. Development, build, CI, and
+verification environments install the complete dependency
 closure from `requirements-dev.lock` with pip hash checking. Clean wheel and
 post-publication installation checks instead preinstall only the exact runtime closure
 from `requirements-runtime.lock`, then install the wheel with dependency resolution
@@ -51,6 +55,13 @@ files reports success without installing dependencies or pulling images. A
 missing or malformed commit range fails closed to the full smoke. Manual dispatch
 always runs it. Expanding the low-risk set requires a reviewed risk-model change;
 new executable or catalogue paths are never implicitly exempted.
+
+The required CI quality job owns the single installed-environment dependency check
+through `scripts/ci-check.sh`; the project validator reads installed distribution
+metadata directly, so it works in both `uv` environments without bundled `pip` and
+standard GitHub Python environments. The complete local gate performs the same
+check in its own environment. The Security workflow is reserved for CodeQL so pull
+requests do not pay for a duplicate dependency installation and validation job.
 
 The release workflow is manual-only and must be dispatched from `main` after the
 maintainer explicitly approves publication. It accepts a CI run ID, verifies via

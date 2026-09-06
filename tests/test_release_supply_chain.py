@@ -9,8 +9,18 @@ from pathlib import Path
 import pytest
 from scripts import release as release_module
 from scripts import secret_scan
-from scripts.check_repository import _dependency_lock_failures, _requirement_records
-from scripts.check_version import _projection_state, check_release_ready
+from scripts.check_repository import (
+    _contributor_covenant_failures,
+    _dependency_lock_failures,
+    _requirement_records,
+)
+from scripts.check_version import (
+    _projection_state,
+    check_release_ready,
+    release_changelog_notes,
+    target_changelog_notes,
+    validate_bootstrap_notes_moved,
+)
 from scripts.check_version import check as check_version
 from scripts.check_workflows import check as check_workflows
 from scripts.generate_sbom import generate, validate_spdx
@@ -28,6 +38,19 @@ def test_runtime_lock_contains_only_declared_runtime_dependencies() -> None:
     assert len(records) == 1
     assert records[0].startswith("pyyaml==6.0.3 ")
     assert "pytest" not in records[0]
+
+
+def test_code_of_conduct_is_the_complete_reviewed_contributor_covenant(
+    tmp_path: Path,
+) -> None:
+    assert _contributor_covenant_failures(Path("CODE_OF_CONDUCT.md")) == []
+
+    abridged = tmp_path / "CODE_OF_CONDUCT.md"
+    abridged.write_text("# Contributor Covenant Code of Conduct\n", encoding="utf-8")
+    assert _contributor_covenant_failures(abridged) == [
+        "CODE_OF_CONDUCT.md must match the reviewed complete Contributor Covenant 2.1 text "
+        "with only the SECURITY.md enforcement-contact adaptation"
+    ]
 
 
 def test_every_canonical_version_projection_is_consistent() -> None:
@@ -111,10 +134,40 @@ def test_release_shaped_local_build_uses_reviewed_target_notes() -> None:
     notes = changelog_notes("1.0.0")
     assert notes.startswith("### Added\n")
     assert "not yet released" not in notes
+    assert "[Unreleased]:" not in notes
+
+
+def test_changelog_note_extraction_excludes_reference_links() -> None:
+    target = (
+        "## [Unreleased]\n\nTarget release: 1.0.0 (not yet released).\n\n"
+        "### Added\n\n- Reviewed note.\n\n[Unreleased]: target-link\n"
+    )
+    released = (
+        "## [Unreleased]\n\n## [1.0.0] - 2026-09-06\n\n"
+        "### Added\n\n- Reviewed note.\n\n"
+        "[Unreleased]: compare-link\n[1.0.0]: release-link\n"
+    )
+
+    assert target_changelog_notes("1.0.0", target) == "### Added\n\n- Reviewed note.\n"
+    assert release_changelog_notes("1.0.0", released) == "### Added\n\n- Reviewed note.\n"
+    validate_bootstrap_notes_moved(target, released, "1.0.0")
 
 
 def test_workflow_supply_chain_policy() -> None:
     check_workflows()
+
+
+def test_dependency_environment_check_is_consolidated() -> None:
+    ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    security = Path(".github/workflows/security.yml").read_text(encoding="utf-8")
+    ci_check = Path("scripts/ci-check.sh").read_text(encoding="utf-8")
+
+    assert "scripts/ci-check.sh" in ci
+    assert "pip check" not in ci
+    assert ci_check.count('"${VDY_PYTHON}" scripts/check_environment.py') == 1
+    assert "dependency-lock:" not in security
+    assert "requirements-dev.lock" not in security
+    assert "pip check" not in security
 
 
 def test_post_release_installs_pinned_verifier_before_validation() -> None:

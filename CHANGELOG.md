@@ -35,7 +35,8 @@ Target release: 1.0.0 (not yet released).
 
 - Validate generated SPDX 2.3 SBOMs with the pinned official SPDX tool, keep clean
   installation checks free of development dependencies, and fail final checkpoints
-  when any managed Docker resource remains.
+  when any managed Docker resource remains. Checkpoints now distinguish a local pass
+  from full release readiness and enumerate every remaining required blocker.
 - Enforce one wall-clock deadline for health and metadata HTTP reads, revalidate
   containment before logs, surface Docker log failures, and make JSON destructive
   and hosts-repair previews non-mutating. Destructive confirmations bind an exact
@@ -43,5 +44,13 @@ Target release: 1.0.0 (not yet released).
   Preview tokens additionally bind the command and exact image-removal scope, human
   previews enumerate every resource and image, and legacy logs fail closed without
   an applicable containment-policy snapshot.
+- Restore the complete Contributor Covenant 2.1 text and consolidate installed-
+  environment dependency validation into the required quality and local gates.
+- Bind confirmed hosts edits to one checksum-verified atomic replacement, serialize
+  Vulhub cache readers and writers, surface same-lab Docker orphans to observational
+  commands, serialize pulls with lifecycle mutation, bound URL opening, and retain
+  captured output when the bounded log-follow window closes.
+- Validate packaged catalogue data against executable Draft 2020-12 schemas and keep
+  bootstrap release notes byte-for-byte equivalent to their reviewed target section.
 
 [Unreleased]: https://github.com/SoBatista/VulnDockyard/commits/main

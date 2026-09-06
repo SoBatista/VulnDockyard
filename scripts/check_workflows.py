@@ -208,6 +208,16 @@ def check() -> None:
         text = path.read_text(encoding="utf-8")
         if path.name == "ci.yml":
             quality = jobs.get("quality", {})
+            quality_text = str(quality)
+            if "scripts/ci-check.sh" not in quality_text:
+                failures.append("ci.yml: quality job must run the consolidated CI gate")
+            if "pip check" in quality_text:
+                failures.append(
+                    "ci.yml: quality must delegate its single dependency check to ci-check.sh"
+                )
+            ci_check = (ROOT / "scripts" / "ci-check.sh").read_text(encoding="utf-8")
+            if ci_check.count('"${VDY_PYTHON}" scripts/check_environment.py') != 1:
+                failures.append("ci-check.sh: dependency environment must be checked exactly once")
             quality_steps = quality.get("steps", []) if isinstance(quality, dict) else []
             quality_checkouts = [
                 step
@@ -256,6 +266,12 @@ def check() -> None:
                         failures.append(
                             f"ci.yml: Python compatibility job lacks required check: {required}"
                         )
+        if path.name == "security.yml" and (
+            "dependency-lock" in jobs or "requirements-dev.lock" in text or "pip check" in text
+        ):
+            failures.append(
+                "security.yml: dependency closure checks must not duplicate the CI quality gate"
+            )
         for match in re.finditer(r"retention-days:\s*(\d+)", text):
             if int(match.group(1)) > 7:
                 failures.append(f"{path.name}: artifact retention exceeds seven days")

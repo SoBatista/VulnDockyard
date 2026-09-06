@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from scripts import self_test
@@ -68,6 +69,14 @@ def test_self_test_launcher_rejects_unbounded_overall_watchdog() -> None:
     assert result.stderr == "VDY_SELF_TEST_TIMEOUT_SECONDS must not exceed 3600 seconds.\n"
 
 
+def test_full_gate_checks_the_installed_dependency_environment_once() -> None:
+    phases = self_test._phases()
+
+    matches = [phase for phase in phases if phase.name == "installed-environment-dependency-check"]
+    assert len(matches) == 1
+    assert matches[0].command[-1] == "scripts/check_environment.py"
+
+
 def test_initialization_failure_checkpoint_cannot_retain_stale_passes() -> None:
     phases = (
         self_test.Phase("first", ("tool", "one"), 10),
@@ -94,6 +103,10 @@ def test_initialization_failure_checkpoint_cannot_retain_stale_passes() -> None:
             "not run because self-test initialization failed: RuntimeError: catalogue unavailable"
         ]
     }
+    assert report["result_scope"] == "locally-applicable-gates"
+    assert report["local_result"] == "fail"
+    assert report["release_ready"] is False
+    assert {blocker["scope"] for blocker in report["blockers"]} == {"local", "remote"}
 
 
 def test_remote_bootstrap_gates_do_not_make_publication_circular() -> None:
@@ -107,6 +120,27 @@ def test_remote_bootstrap_gates_do_not_make_publication_circular() -> None:
     }
     assert "GitHub release publication and artifact attestation" in post_release
     assert "manual published artifact and attestation verification" in post_release
+
+
+def test_checkpoint_distinguishes_local_pass_from_release_readiness() -> None:
+    report: dict[str, Any] = {
+        "result": "pass",
+        "gates": [{"name": "local", "result": "pass", "reason": ""}],
+        "residual_docker_resources": {"containers": [], "networks": [], "volumes": []},
+        "remote_bootstrap_gates": self_test._remote_bootstrap_gates(),
+    }
+
+    self_test._refresh_checkpoint_status(report)
+
+    assert report["result"] == "pass"
+    assert report["result_scope"] == "locally-applicable-gates"
+    assert report["local_result"] == "pass"
+    assert report["release_ready"] is False
+    assert [blocker["gate"] for blocker in report["blockers"]] == [
+        "hosted CI and security workflows",
+        "repository ruleset and private vulnerability reporting",
+    ]
+    assert all(blocker["scope"] == "remote" for blocker in report["blockers"])
 
 
 def test_smoke_checkpoint_loader_requires_a_terminal_machine_contract(

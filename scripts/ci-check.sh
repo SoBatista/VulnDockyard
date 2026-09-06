@@ -13,6 +13,7 @@ else
 fi
 
 timeout --signal=TERM --kill-after=10s 30s "${VDY_PYTHON}" scripts/check_version.py
+timeout --signal=TERM --kill-after=10s 30s "${VDY_PYTHON}" scripts/check_environment.py
 timeout --signal=TERM --kill-after=10s 30s "${VDY_PYTHON}" -m ruff format --check src tests scripts
 timeout --signal=TERM --kill-after=10s 60s "${VDY_PYTHON}" -m ruff check src tests scripts
 timeout --signal=TERM --kill-after=10s 180s "${VDY_PYTHON}" -m mypy src tests scripts

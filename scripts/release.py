@@ -82,15 +82,7 @@ def _verify_main_ci(head: str) -> None:
 
 def _reviewed_notes(version: str) -> str:
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    match = re.search(
-        rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}\n"
-        r"(?P<body>.*?)(?=^## |\Z)",
-        text,
-        flags=re.MULTILINE | re.DOTALL,
-    )
-    if match is None or not match.group("body").strip():
-        raise RuntimeError(f"changelog has no release notes for {version}")
-    return match.group("body").strip() + "\n"
+    return version_tools.release_changelog_notes(version, text)
 
 
 def prepare() -> None:

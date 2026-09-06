@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from scripts import check_release_metadata
+from scripts.check_version import validate_bootstrap_notes_moved
 
 
 def _bootstrap_context(monkeypatch: pytest.MonkeyPatch, *, released: bool) -> None:
@@ -25,6 +28,45 @@ def test_unreleased_bootstrap_does_not_require_a_release_impact_label(
 ) -> None:
     _bootstrap_context(monkeypatch, released=False)
     check_release_metadata.check()
+
+
+def test_bootstrap_release_requires_the_complete_reviewed_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = (
+        "# Changelog\n\n## [Unreleased]\n\n"
+        "Target release: 1.0.0 (not yet released).\n\n"
+        "### Added\n\n- First reviewed capability.\n- Second reviewed capability.\n\n"
+        "[Unreleased]: https://example.test/commits/main\n"
+    )
+    current = (
+        "# Changelog\n\n## [Unreleased]\n\n"
+        "## [1.0.0] - 2026-09-06\n\n"
+        "### Added\n\n- First reviewed capability.\n\n"
+        "[Unreleased]: https://example.test/compare/v1.0.0...HEAD\n"
+        "[1.0.0]: https://example.test/releases/tag/v1.0.0\n"
+    )
+    (tmp_path / "CHANGELOG.md").write_text(current, encoding="utf-8")
+    _bootstrap_context(monkeypatch, released=False)
+    monkeypatch.setattr(check_release_metadata, "ROOT", tmp_path)
+    monkeypatch.setattr(check_release_metadata, "_base_changelog", lambda value: base)
+
+    with pytest.raises(RuntimeError, match="complete Unreleased notes intact"):
+        check_release_metadata.check()
+
+
+def test_bootstrap_note_move_accepts_exact_categorized_content() -> None:
+    base = (
+        "## [Unreleased]\n\nTarget release: 1.0.0 (not yet released).\n\n"
+        "### Added\n\n- Complete reviewed notes.\n\n[Unreleased]: example\n"
+    )
+    current = (
+        "## [Unreleased]\n\n## [1.0.0] - 2026-09-06\n\n"
+        "### Added\n\n- Complete reviewed notes.\n\n"
+        "[Unreleased]: compare\n[1.0.0]: release\n"
+    )
+
+    validate_bootstrap_notes_moved(base, current, "1.0.0")
 
 
 def test_released_bootstrap_cannot_bypass_policy_when_tag_is_unavailable(
