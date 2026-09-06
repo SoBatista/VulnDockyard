@@ -17,6 +17,7 @@ from vulndockyard.docker import (
     MANIFEST,
     OWNER,
     SEED_READY_MARKER,
+    SEED_SCRIPT,
     Docker,
     Ownership,
     Timeouts,
@@ -26,7 +27,7 @@ from vulndockyard.errors import IntegrityError, PolicyError, PreflightError
 from vulndockyard.paths import Paths
 from vulndockyard.process import Result
 from vulndockyard.runtime import Runtime, _NoRedirect
-from vulndockyard.state import ResourceRecord, RunState, UpdateJournal
+from vulndockyard.state import ResourceRecord, RunState, RuntimePolicySnapshot, UpdateJournal
 
 
 class FakeDocker:
@@ -44,6 +45,7 @@ class FakeDocker:
         self.fail_seeder = False
         self.seeder_ready = True
         self.seeder_exits = False
+        self.application_exits = False
         self.engine_version = "28.0.0"
 
     def _id(self) -> str:
@@ -56,6 +58,10 @@ class FakeDocker:
             for object_id, inspection in self.objects.items()
             if inspection.get("Name") == name and "Config" not in inspection
         )
+
+    def _attach(self, network_name: str, container_id: str) -> None:
+        network_id = self._network_id(network_name)
+        self.objects[network_id]["Containers"][container_id] = {"Name": container_id[:12]}
 
     @staticmethod
     def _label_map(value: Ownership, role: str) -> dict[str, str]:
@@ -99,6 +105,7 @@ class FakeDocker:
             "EnableIPv6": False,
             "Ingress": False,
             "Options": {GATEWAY_MODE_IPV4: "isolated" if internal else "nat"},
+            "Containers": {},
         }
         return ResourceRecord("network", name, object_id)
 
@@ -138,7 +145,7 @@ class FakeDocker:
                 "PidsLimit": values["pids"],
                 "LogConfig": {
                     "Type": "local",
-                    "Config": {"max-file": "2", "max-size": "10m"},
+                    "Config": {"compress": "true", "max-file": "2", "max-size": "10m"},
                 },
                 "Tmpfs": {
                     mount.container_path: (
@@ -156,11 +163,22 @@ class FakeDocker:
                     "RW": True,
                 }
                 for volume, mount in values["seeded_mounts"]
+            ]
+            + [
+                {
+                    "Type": "tmpfs",
+                    "Source": "",
+                    "Destination": mount.container_path,
+                    "Mode": "",
+                    "RW": True,
+                    "Propagation": "",
+                }
+                for mount in values["empty_mounts"]
             ],
             "NetworkSettings": {
-                "Networks": {values["network"]: {"NetworkID": self._network_id(values["network"])}}
+                "Networks": {values["network"]: {"NetworkID": "", "EndpointID": ""}}
             },
-            "State": {"Running": False},
+            "State": {"Running": False, "Status": "created"},
         }
         return ResourceRecord("container", values["name"], object_id)
 
@@ -176,7 +194,10 @@ class FakeDocker:
         options = {
             "type": "tmpfs",
             "device": "tmpfs",
-            "o": (f"size={mount.size_mb}m,uid={values['uid']},gid={values['gid']},mode=0700"),
+            "o": (
+                f"size={mount.size_mb}m,uid={values['uid']},gid={values['gid']},mode=0700,"
+                "noexec,nosuid,nodev"
+            ),
         }
         self.objects[name] = {
             "Name": name,
@@ -200,7 +221,7 @@ class FakeDocker:
         expected = {
             "type": "tmpfs",
             "device": "tmpfs",
-            "o": f"size={mount.size_mb}m,uid={uid},gid={gid},mode=0700",
+            "o": (f"size={mount.size_mb}m,uid={uid},gid={gid},mode=0700,noexec,nosuid,nodev"),
         }
         if inspection.get("Driver") != "local" or inspection.get("Options") != expected:
             raise PolicyError("ephemeral volume has unexpected driver options")
@@ -211,16 +232,64 @@ class FakeDocker:
             raise PreflightError("synthetic seeder failure")
         object_id = self._id()
         owner: Ownership = values["ownership"]
+        payload = Docker.seeder_payload(values["seeded_mounts"])
         self.objects[object_id] = {
             "Id": object_id,
             "Name": values["name"],
-            "Config": {"Labels": self._label_map(owner, "seeder"), "Image": values["image"]},
-            "HostConfig": {"PortBindings": {}, "ReadonlyRootfs": True},
-            "NetworkSettings": {"Networks": {}},
-            "State": {"Running": False},
+            "Config": {
+                "Labels": self._label_map(owner, "seeder"),
+                "Image": values["image"],
+                "User": f"{values['uid']}:{values['gid']}",
+                "Entrypoint": ["/nodejs/bin/node"],
+                "Cmd": ["-e", SEED_SCRIPT, payload],
+            },
+            "HostConfig": {
+                "NetworkMode": "none",
+                "PortBindings": {},
+                "PublishAllPorts": False,
+                "ReadonlyRootfs": True,
+                "Privileged": False,
+                "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+                "PidMode": "",
+                "IpcMode": "private",
+                "UsernsMode": "",
+                "CapDrop": ["ALL"],
+                "CapAdd": None,
+                "SecurityOpt": ["no-new-privileges=true"],
+                "Devices": [],
+                "DeviceRequests": None,
+                "Memory": 128 * 1024 * 1024,
+                "MemorySwap": 128 * 1024 * 1024,
+                "NanoCpus": 250_000_000,
+                "PidsLimit": 64,
+                "Tmpfs": None,
+                "LogConfig": {
+                    "Type": "local",
+                    "Config": {
+                        "compress": "true",
+                        "max-file": "2",
+                        "max-size": "10m",
+                    },
+                },
+            },
+            "Mounts": [
+                {
+                    "Type": "volume",
+                    "Name": volume.name,
+                    "Destination": f"/vdy-seed/{mount.name}",
+                    "RW": True,
+                }
+                for volume, mount in values["seeded_mounts"]
+            ],
+            "NetworkSettings": {"Networks": {"none": {"NetworkID": "", "EndpointID": ""}}},
+            "State": {"Running": False, "Status": "created"},
         }
         self.events.append(("create-seeder", values["image"]))
         return ResourceRecord("container", values["name"], object_id)
+
+    @staticmethod
+    def validate_seeder_policy(inspection: dict[str, Any], **values: Any) -> None:
+        Docker.validate_seeder_policy(inspection, **values)
 
     def create_gateway(self, **values: Any) -> ResourceRecord:
         if self.fail_gateway:
@@ -271,14 +340,14 @@ class FakeDocker:
                 ),
                 "LogConfig": {
                     "Type": "local",
-                    "Config": {"max-file": "2", "max-size": "10m"},
+                    "Config": {"compress": "true", "max-file": "2", "max-size": "10m"},
                 },
             },
             "Mounts": [],
             "NetworkSettings": {
-                "Networks": {values["network"]: {"NetworkID": self._network_id(values["network"])}}
+                "Networks": {values["network"]: {"NetworkID": "", "EndpointID": ""}}
             },
-            "State": {"Running": False},
+            "State": {"Running": False, "Status": "created"},
         }
         self.ports[port] = object_id
         self.events.append(("create-gateway", port))
@@ -305,17 +374,44 @@ class FakeDocker:
         assert network.object_id in self.objects and container.object_id in self.objects
         networks = self.objects[container.object_id]["NetworkSettings"]["Networks"]
         if network.name not in networks:
-            networks[network.name] = {"NetworkID": network.object_id}
+            networks[network.name] = {"NetworkID": "", "EndpointID": ""}
+            if self.objects[container.object_id]["State"]["Running"]:
+                networks[network.name] = {
+                    "NetworkID": network.object_id,
+                    "EndpointID": container.object_id,
+                }
+                self._attach(network.name, container.object_id)
             self.connections.append((network.object_id, container.object_id))
 
     def network_connected(self, network: ResourceRecord, container: ResourceRecord) -> bool:
-        networks = self.objects[container.object_id]["NetworkSettings"]["Networks"]
-        attachment = networks.get(network.name)
-        if attachment is None:
-            return False
-        if attachment.get("NetworkID") != network.object_id:
-            raise PolicyError("network attachment identity differs from state")
-        return True
+        return Docker.network_connected(self, network, container)  # type: ignore[arg-type]
+
+    @staticmethod
+    def container_networks(inspection: dict[str, Any]) -> dict[str, str]:
+        return Docker.container_networks(inspection)
+
+    @staticmethod
+    def validate_network_endpoints(
+        inspection: dict[str, Any], *, expected_container_ids: set[str]
+    ) -> None:
+        Docker.validate_network_endpoints(inspection, expected_container_ids=expected_container_ids)
+
+    def configured_network_consumers(self, network: ResourceRecord) -> set[str]:
+        consumers: set[str] = set()
+        for object_id, inspection in self.objects.items():
+            if "Config" not in inspection:
+                continue
+            settings = inspection.get("NetworkSettings")
+            networks = settings.get("Networks") if isinstance(settings, dict) else None
+            if not isinstance(networks, dict):
+                raise IntegrityError("Docker container network inspection is malformed")
+            for name, attachment in networks.items():
+                if not isinstance(attachment, dict):
+                    raise IntegrityError("Docker container network attachment is malformed")
+                attached_id = attachment.get("NetworkID")
+                if attached_id == network.object_id or (attached_id == "" and name == network.name):
+                    consumers.add(object_id)
+        return consumers
 
     def inspect(self, kind: str, object_id: str) -> dict[str, Any]:
         return self.objects[object_id]
@@ -342,13 +438,40 @@ class FakeDocker:
         role = self._labels("container", self.objects[record.object_id]).get(
             "org.vulndockyard.role"
         )
-        self.objects[record.object_id]["State"]["Running"] = not (
-            role == "seeder" and self.seeder_exits
+        exits = (role == "seeder" and self.seeder_exits) or (
+            role == "application" and self.application_exits
         )
+        running = not exits
+        self.objects[record.object_id]["State"] = {
+            "Running": running,
+            "Status": "running" if running else "exited",
+        }
+        none_attachment = self.objects[record.object_id]["NetworkSettings"]["Networks"].get("none")
+        if isinstance(none_attachment, dict):
+            none_attachment["NetworkID"] = "0" * 64
+            none_attachment["EndpointID"] = record.object_id if running else ""
+        if running:
+            for network_name, attachment in self.objects[record.object_id]["NetworkSettings"][
+                "Networks"
+            ].items():
+                if network_name != "none":
+                    attachment["NetworkID"] = self._network_id(network_name)
+                    attachment["EndpointID"] = record.object_id
+                    self._attach(network_name, record.object_id)
         self.events.append(("start", record.name))
 
     def stop(self, record: ResourceRecord) -> None:
-        self.objects[record.object_id]["State"]["Running"] = False
+        self.objects[record.object_id]["State"] = {"Running": False, "Status": "exited"}
+        none_attachment = self.objects[record.object_id]["NetworkSettings"]["Networks"].get("none")
+        if isinstance(none_attachment, dict):
+            none_attachment["EndpointID"] = ""
+        for attachment in self.objects[record.object_id]["NetworkSettings"]["Networks"].values():
+            if isinstance(attachment, dict):
+                attachment["EndpointID"] = ""
+        for inspection in self.objects.values():
+            endpoints = inspection.get("Containers")
+            if isinstance(endpoints, dict):
+                endpoints.pop(record.object_id, None)
         self.events.append(("stop", record.name))
 
     def remove(self, record: ResourceRecord) -> None:
@@ -360,6 +483,10 @@ class FakeDocker:
                 port = int(binding[0]["HostPort"])
                 self.ports.pop(port, None)
                 self.events.append(("remove-gateway", port))
+            for network in self.objects.values():
+                endpoints = network.get("Containers")
+                if isinstance(endpoints, dict):
+                    endpoints.pop(record.object_id, None)
         del self.objects[record.object_id]
 
     def remove_image(self, reference: str) -> None:
@@ -394,8 +521,17 @@ class ReadyRuntime(Runtime):
         self.health_calls = 0
         self.fail_health = False
         self.fail_health_call: int | None = None
+        self.snapshot_health: list[RuntimePolicySnapshot] = []
 
     def _health(self, lab: ReviewedLab, port: int) -> None:
+        del lab
+        self._record_health(port)
+
+    def _health_snapshot(self, policy: RuntimePolicySnapshot, port: int) -> None:
+        self.snapshot_health.append(policy)
+        self._record_health(port)
+
+    def _record_health(self, port: int) -> None:
         self.health_calls += 1
         self.docker.events.append(("health", port))  # type: ignore[attr-defined]
         if self.fail_health or self.health_calls == self.fail_health_call:
@@ -480,7 +616,11 @@ def test_reference_runtime_has_exact_bounded_storage_and_no_final_seeder(
         )
         for mount in lab.manifest.ephemeral_storage.empty
     }
-    assert {(mount["Name"], mount["Destination"]) for mount in inspection["Mounts"]} == {
+    assert {
+        (mount["Name"], mount["Destination"])
+        for mount in inspection["Mounts"]
+        if mount["Type"] == "volume"
+    } == {
         (
             f"vdy-juice-shop-{state.run_id[:12]}-volume-{mount.name}",
             mount.container_path,
@@ -559,6 +699,76 @@ def test_seeder_without_exact_ready_marker_fails_and_cleans_exact_resources(
     assert len(docker.removed) == 7
 
 
+def test_seeder_must_remain_running_after_its_ready_marker(xdg_paths: Paths) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    docker.seeder_exits = True
+
+    with pytest.raises(PreflightError, match="exited after reporting readiness"):
+        value.up(lab, host_port=18080)
+
+    assert docker.objects == {}
+    assert value.store.load(lab.manifest.id) is None
+
+
+def test_application_must_remain_running_before_the_seeder_is_removed(xdg_paths: Paths) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    docker.application_exits = True
+
+    with pytest.raises(PreflightError, match="did not remain running"):
+        value.up(lab, host_port=18080)
+
+    assert docker.objects == {}
+    assert value.store.load(lab.manifest.id) is None
+
+
+@pytest.mark.parametrize("existing_runtime", [False, True])
+def test_seeder_must_remain_running_until_application_start_completes(
+    xdg_paths: Paths,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_runtime: bool,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    if existing_runtime:
+        value.up(lab, host_port=18080)
+        value.stop(lab)
+    start = docker.start
+
+    def start_and_expire_seeder(record: ResourceRecord) -> None:
+        start(record)
+        inspection = docker.objects[record.object_id]
+        role = docker._labels("container", inspection).get("org.vulndockyard.role")
+        if role == "application":
+            for candidate in docker.objects.values():
+                if (
+                    "Config" in candidate
+                    and docker._labels("container", candidate).get("org.vulndockyard.role")
+                    == "seeder"
+                ):
+                    candidate["State"]["Running"] = False
+
+    monkeypatch.setattr(docker, "start", start_and_expire_seeder)
+
+    with pytest.raises(PreflightError, match="stopped while application started"):
+        value.up(lab, host_port=18080)
+
+    assert not any(
+        "Config" in inspection
+        and docker._labels("container", inspection).get("org.vulndockyard.role") == "seeder"
+        for inspection in docker.objects.values()
+    )
+    if existing_runtime:
+        state = value.store.load(lab.manifest.id)
+        assert state is not None
+        assert all(
+            not inspection["State"]["Running"]
+            for inspection in docker.objects.values()
+            if "Config" in inspection
+        )
+    else:
+        assert docker.objects == {}
+        assert value.store.load(lab.manifest.id) is None
+
+
 def test_old_engine_blocks_lab_execution_but_not_owned_cleanup(xdg_paths: Paths) -> None:
     value, docker, lab = runtime(xdg_paths)
     value.up(lab, host_port=18080)
@@ -590,6 +800,74 @@ def test_old_engine_blocks_lab_execution_but_not_owned_cleanup(xdg_paths: Paths)
     assert value.residual_audit() == {"container": (), "network": (), "volume": ()}
 
 
+def test_old_engine_stop_aborts_an_interrupted_update_without_execution(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    candidate = value._create_run(
+        lab,
+        host_port=28080,
+        selected_reference=lab.manifest.images[0].reference,
+        trusted=True,
+        persist=False,
+        coexisting=(previous,),
+    )
+    old_gateway = next(record for record in previous.resources if record.name.endswith("-gateway"))
+    docker.remove(old_gateway)
+    value.store.save_update(
+        UpdateJournal(
+            1,
+            lab.manifest.id,
+            "cutover",
+            previous,
+            candidate,
+            ("application", "gateway"),
+            28080,
+        )
+    )
+    policy = previous.runtime_policy
+    assert policy is not None
+    rollback_seeder = docker.create_seeder(
+        name=f"vdy-{previous.lab_id}-{previous.run_id[:12]}-seeder",
+        image=previous.requested_reference,
+        ownership=Ownership.from_state(previous),
+        seeded_mounts=value._seeded_mounts_from_snapshot(previous, policy),
+        uid=policy.ephemeral_storage.uid,
+        gid=policy.ephemeral_storage.gid,
+    )
+    docker.start(rollback_seeder)
+    observation_events = tuple(docker.events)
+    for observe in (
+        lambda: value.status(lab),
+        lambda: value.logs(lab, follow=False),
+        lambda: value.verify(lab),
+    ):
+        with pytest.raises(PolicyError, match="interrupted update is pending"):
+            observe()
+    assert tuple(docker.events) == observation_events
+
+    docker.engine_version = "26.1.5"
+    create_count = docker.create_count
+    event_count = len(docker.events)
+
+    status = value.stop(lab)
+
+    assert status.state == "degraded"
+    assert docker.create_count == create_count
+    assert not any(event[0] == "start" for event in docker.events[event_count:])
+    assert rollback_seeder.object_id in docker.removed
+    assert value.store.load_update(lab.manifest.id) is None
+    assert not any(
+        labels.get(MANIFEST) == lab.manifest_identity
+        for inspection in docker.objects.values()
+        for labels in [
+            inspection["Config"]["Labels"] if "Config" in inspection else inspection["Labels"]
+        ]
+    )
+
+
 def test_interrupted_startup_cleans_only_created_resources(xdg_paths: Paths) -> None:
     value, docker, lab = runtime(xdg_paths)
     docker.fail_gateway = True
@@ -598,6 +876,33 @@ def test_interrupted_startup_cleans_only_created_resources(xdg_paths: Paths) -> 
     assert docker.objects == {}
     assert value.store.load(lab.manifest.id) is None
     assert len(docker.removed) == 8
+
+
+def test_late_steady_state_topology_failure_cleans_the_new_runtime(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+
+    def corrupt_after_identity(selected: ReviewedLab, port: int) -> None:
+        del selected, port
+        application_id = next(
+            object_id
+            for object_id, inspection in docker.objects.items()
+            if "Config" in inspection
+            and docker._labels("container", inspection).get("org.vulndockyard.role")
+            == "application"
+        )
+        docker.objects[application_id]["NetworkSettings"]["Networks"]["foreign"] = {
+            "NetworkID": "f" * 64
+        }
+
+    monkeypatch.setattr(value, "_health", corrupt_after_identity)
+
+    with pytest.raises(PolicyError, match="unreviewed network attachment"):
+        value.up(lab, host_port=18080)
+
+    assert value.store.load(lab.manifest.id) is None
+    assert docker.objects == {}
 
 
 def test_startup_recovers_an_object_created_before_the_next_checkpoint(
@@ -625,6 +930,42 @@ def test_startup_recovers_an_object_created_before_the_next_checkpoint(
     assert docker.objects == {}
     assert value.store.load(lab.manifest.id) is None
     assert len(docker.removed) == 1
+
+
+def test_cleanup_adopts_a_seeder_interrupted_before_its_runtime_checkpoint(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    value.stop(lab)
+    create_seeder = docker.create_seeder
+    interrupted = False
+
+    def create_then_interrupt(**values: Any) -> ResourceRecord:
+        nonlocal interrupted
+        record = create_seeder(**values)
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return record
+
+    monkeypatch.setattr(docker, "create_seeder", create_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        value.up(lab, host_port=18080)
+    seeder = next(
+        ResourceRecord("container", inspection["Name"], object_id)
+        for object_id, inspection in docker.objects.items()
+        if "Config" in inspection
+        and docker._labels("container", inspection).get("org.vulndockyard.role") == "seeder"
+    )
+    with pytest.raises(PolicyError, match="without usable runtime state"):
+        value.status(lab)
+
+    monkeypatch.setattr(docker, "create_seeder", create_seeder)
+    assert value.stop(lab).state == "stopped"
+    assert seeder.object_id in docker.removed
+    assert value.remove(lab).state == "absent"
+    assert docker.objects == {}
 
 
 def test_reviewed_update_current_and_no_runtime_are_non_mutating(xdg_paths: Paths) -> None:
@@ -729,7 +1070,7 @@ def test_final_port_failure_recreates_prior_gateway_and_running_state(
     assert value.store.load_update(lab.manifest.id) is None
 
 
-def test_next_lifecycle_command_rolls_back_an_interrupted_cutover(
+def test_execution_recovery_rolls_back_an_interrupted_cutover(
     xdg_paths: Paths,
 ) -> None:
     value, docker, lab = runtime(xdg_paths)
@@ -781,7 +1122,8 @@ def test_next_lifecycle_command_rolls_back_an_interrupted_cutover(
         )
     )
 
-    status = value.status(lab)
+    value._recover_update(lab)
+    status = value._status(lab)
 
     assert status.run_id == previous.run_id
     assert status.state == "running"
@@ -790,7 +1132,7 @@ def test_next_lifecycle_command_rolls_back_an_interrupted_cutover(
     assert docker.ports.keys() == {18080}
 
 
-def test_next_lifecycle_adopts_an_exact_unjournaled_rollback_gateway(
+def test_execution_recovery_adopts_an_exact_unjournaled_rollback_gateway(
     xdg_paths: Paths,
 ) -> None:
     value, docker, lab = runtime(xdg_paths)
@@ -828,7 +1170,8 @@ def test_next_lifecycle_adopts_an_exact_unjournaled_rollback_gateway(
         )
     )
 
-    status = value.status(lab)
+    value._recover_update(lab)
+    status = value._status(lab)
 
     restored = value.store.load(lab.manifest.id)
     assert restored is not None
@@ -862,12 +1205,157 @@ def test_ready_journal_completes_cleanup_after_interruption(
     assert active is not None and active.run_id == journal.candidate.run_id
 
     monkeypatch.setattr(value, "_cleanup", original_cleanup)
-    recovered = value.status(lab)
+    value._recover_update(lab)
+    recovered = value._status(lab)
 
     assert recovered.run_id == active.run_id
     assert recovered.lock_match
     assert value.store.load_update(lab.manifest.id) is None
     assert len(docker.objects) == 8
+
+
+def test_ready_journal_restores_previous_if_candidate_degrades_before_recovery(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    original_cleanup = value._cleanup
+
+    def interrupt_old_cleanup(state: RunState, *, coexisting: tuple[RunState, ...] = ()) -> None:
+        if state.run_id == previous.run_id:
+            raise PreflightError("synthetic cleanup interruption")
+        original_cleanup(state, coexisting=coexisting)
+
+    monkeypatch.setattr(value, "_cleanup", interrupt_old_cleanup)
+    with pytest.raises(PreflightError, match="cleanup interruption"):
+        value.activate_reviewed_update(lab)
+    journal = value.store.load_update(lab.manifest.id)
+    assert journal is not None and journal.phase == "ready"
+    candidate_ids = {record.object_id for record in journal.candidate.resources}
+    application = next(
+        record for record in journal.candidate.resources if record.name.endswith("-app")
+    )
+    docker.stop(application)
+
+    monkeypatch.setattr(value, "_cleanup", original_cleanup)
+    with pytest.raises(PreflightError, match="prior deployment restored"):
+        value._recover_update(lab)
+
+    restored = value.store.load(lab.manifest.id)
+    assert restored is not None and restored.run_id == previous.run_id
+    assert value.store.load_update(lab.manifest.id) is None
+    assert not candidate_ids.intersection(docker.objects)
+    assert value._status(lab).state == "running"
+
+
+def test_ready_journal_rechecks_health_before_discarding_previous(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    original_cleanup = value._cleanup
+
+    def interrupt_old_cleanup(state: RunState, *, coexisting: tuple[RunState, ...] = ()) -> None:
+        if state.run_id == previous.run_id:
+            raise PreflightError("synthetic cleanup interruption")
+        original_cleanup(state, coexisting=coexisting)
+
+    monkeypatch.setattr(value, "_cleanup", interrupt_old_cleanup)
+    with pytest.raises(PreflightError, match="cleanup interruption"):
+        value.activate_reviewed_update(lab)
+    journal = value.store.load_update(lab.manifest.id)
+    assert journal is not None and journal.phase == "ready"
+    candidate_ids = {record.object_id for record in journal.candidate.resources}
+
+    monkeypatch.setattr(value, "_cleanup", original_cleanup)
+    value.fail_health_call = value.health_calls + 1
+    with pytest.raises(
+        PreflightError,
+        match="failed validation or readiness; prior deployment restored",
+    ):
+        value._recover_update(lab)
+
+    restored = value.store.load(lab.manifest.id)
+    assert restored is not None and restored.run_id == previous.run_id
+    assert value.store.load_update(lab.manifest.id) is None
+    assert not candidate_ids.intersection(docker.objects)
+    assert value._status(lab).state == "running"
+
+
+def test_ready_journal_policy_drift_restores_previous_before_discarding_it(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    original_cleanup = value._cleanup
+
+    def interrupt_old_cleanup(state: RunState, *, coexisting: tuple[RunState, ...] = ()) -> None:
+        if state.run_id == previous.run_id:
+            raise PreflightError("synthetic cleanup interruption")
+        original_cleanup(state, coexisting=coexisting)
+
+    monkeypatch.setattr(value, "_cleanup", interrupt_old_cleanup)
+    with pytest.raises(PreflightError, match="cleanup interruption"):
+        value.activate_reviewed_update(lab)
+    journal = value.store.load_update(lab.manifest.id)
+    assert journal is not None and journal.phase == "ready"
+    candidate_ids = {record.object_id for record in journal.candidate.resources}
+    application = next(
+        record for record in journal.candidate.resources if record.name.endswith("-app")
+    )
+    docker.objects[application.object_id]["HostConfig"]["Memory"] = 1
+
+    monkeypatch.setattr(value, "_cleanup", original_cleanup)
+    with pytest.raises(
+        PreflightError,
+        match="failed validation or readiness; prior deployment restored",
+    ):
+        value._recover_update(lab)
+
+    restored = value.store.load(lab.manifest.id)
+    assert restored is not None and restored.run_id == previous.run_id
+    assert value.store.load_update(lab.manifest.id) is None
+    assert not candidate_ids.intersection(docker.objects)
+    assert value._status(lab).state == "running"
+
+
+def test_ready_journal_retains_evidence_when_transactional_restore_fails(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    original_cleanup = value._cleanup
+
+    def interrupt_old_cleanup(state: RunState, *, coexisting: tuple[RunState, ...] = ()) -> None:
+        if state.run_id == previous.run_id:
+            raise PreflightError("synthetic cleanup interruption")
+        original_cleanup(state, coexisting=coexisting)
+
+    monkeypatch.setattr(value, "_cleanup", interrupt_old_cleanup)
+    with pytest.raises(PreflightError, match="cleanup interruption"):
+        value.activate_reviewed_update(lab)
+    journal = value.store.load_update(lab.manifest.id)
+    assert journal is not None and journal.phase == "ready"
+    application = next(
+        record for record in journal.candidate.resources if record.name.endswith("-app")
+    )
+    docker.objects[application.object_id]["HostConfig"]["Memory"] = 1
+    monkeypatch.setattr(
+        value,
+        "_restore_previous_update",
+        lambda selected, update: (_ for _ in ()).throw(
+            PolicyError("synthetic rollback ownership failure")
+        ),
+    )
+
+    with pytest.raises(PreflightError, match="rollback also failed; update journal retained"):
+        value._recover_update(lab)
+
+    assert value.store.load_update(lab.manifest.id) == journal
 
 
 def test_cli_failed_candidate_restores_previous_runtime_and_discards_candidate(
@@ -941,6 +1429,153 @@ def test_failed_update_restores_exact_prior_running_roles(xdg_paths: Paths) -> N
     assert running_by_role == {"application": True, "gateway": False}
 
 
+def test_interrupted_rollback_reseeds_before_restarting_the_prior_application(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    candidate = value._create_run(
+        lab,
+        host_port=28080,
+        selected_reference=lab.manifest.images[0].reference,
+        trusted=True,
+        persist=False,
+        coexisting=(previous,),
+    )
+    for record in previous.resources:
+        if record.kind == "container":
+            docker.stop(record)
+    value.store.save_update(
+        UpdateJournal(
+            1,
+            lab.manifest.id,
+            "staged",
+            previous,
+            candidate,
+            ("application", "gateway"),
+            28080,
+        )
+    )
+    docker.events.clear()
+
+    value._recover_update(lab)
+
+    seed_event = next(index for index, event in enumerate(docker.events) if event[0] == "seed-log")
+    app_start = next(
+        index
+        for index, event in enumerate(docker.events)
+        if event == ("start", next(r.name for r in previous.resources if r.name.endswith("-app")))
+    )
+    assert seed_event < app_start
+    assert value.snapshot_health == [previous.runtime_policy]
+    assert not any(
+        docker._labels("container", inspection).get("org.vulndockyard.role") == "seeder"
+        for inspection in docker.objects.values()
+        if "Config" in inspection
+    )
+
+
+def test_rollback_adopts_an_unjournaled_seeder_after_the_create_checkpoint_window(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    candidate = value._create_run(
+        lab,
+        host_port=28080,
+        selected_reference=lab.manifest.images[0].reference,
+        trusted=True,
+        persist=False,
+        coexisting=(previous,),
+    )
+    for record in previous.resources:
+        if record.kind == "container":
+            docker.stop(record)
+    value.store.save_update(
+        UpdateJournal(
+            1,
+            lab.manifest.id,
+            "staged",
+            previous,
+            candidate,
+            ("application", "gateway"),
+            28080,
+        )
+    )
+    create_seeder = docker.create_seeder
+    interrupted = False
+
+    def create_then_interrupt(**values: Any) -> ResourceRecord:
+        nonlocal interrupted
+        record = create_seeder(**values)
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return record
+
+    monkeypatch.setattr(docker, "create_seeder", create_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        value._recover_update(lab)
+    orphan = next(
+        ResourceRecord("container", inspection["Name"], object_id)
+        for object_id, inspection in docker.objects.items()
+        if "Config" in inspection
+        and docker._labels("container", inspection).get("org.vulndockyard.role") == "seeder"
+    )
+    pending = value.store.load_update(lab.manifest.id)
+    assert pending is not None and orphan not in pending.previous.resources
+
+    monkeypatch.setattr(docker, "create_seeder", create_seeder)
+    value._recover_update(lab)
+
+    assert orphan.object_id in docker.removed
+    assert value.store.load_update(lab.manifest.id) is None
+    assert not any(
+        docker._labels("container", inspection).get("org.vulndockyard.role") == "seeder"
+        for inspection in docker.objects.values()
+        if "Config" in inspection
+    )
+
+
+def test_rollback_health_failure_retains_the_recovery_journal(xdg_paths: Paths) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    candidate = value._create_run(
+        lab,
+        host_port=28080,
+        selected_reference=lab.manifest.images[0].reference,
+        trusted=True,
+        persist=False,
+        coexisting=(previous,),
+    )
+    for record in previous.resources:
+        if record.kind == "container":
+            docker.stop(record)
+    value.store.save_update(
+        UpdateJournal(
+            1,
+            lab.manifest.id,
+            "staged",
+            previous,
+            candidate,
+            ("application", "gateway"),
+            28080,
+        )
+    )
+    value.fail_health_call = value.health_calls + 1
+
+    with pytest.raises(PreflightError, match="candidate identity failure"):
+        value._recover_update(lab)
+
+    assert value.store.load_update(lab.manifest.id) is not None
+    value.fail_health_call = None
+    value._recover_update(lab)
+    assert value.store.load_update(lab.manifest.id) is None
+
+
 def test_update_rejects_a_candidate_not_bound_to_its_reviewed_lock(xdg_paths: Paths) -> None:
     value, docker, lab = runtime(xdg_paths)
     value.up(lab, host_port=18080)
@@ -953,6 +1588,104 @@ def test_update_rejects_a_candidate_not_bound_to_its_reviewed_lock(xdg_paths: Pa
         value.activate_reviewed_update(candidate)
     assert tuple(docker.pulls) == pulls_before
     assert value.store.load(lab.manifest.id) == previous
+
+
+def test_update_rejects_effective_drift_in_the_preserved_rollback_base(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    application = next(record for record in previous.resources if record.name.endswith("-app"))
+    docker.objects[application.object_id]["HostConfig"]["Memory"] = 0
+    pulls_before = tuple(docker.pulls)
+
+    with pytest.raises(PolicyError, match="resource limits differ"):
+        value.activate_reviewed_update(lab)
+
+    assert tuple(docker.pulls) == pulls_before
+    assert value.store.load_update(lab.manifest.id) is None
+
+
+def test_interrupted_update_revalidates_rollback_base_before_candidate_cleanup(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    candidate = value._create_run(
+        lab,
+        host_port=28080,
+        selected_reference=lab.manifest.images[0].reference,
+        trusted=True,
+        persist=False,
+        coexisting=(previous,),
+    )
+    value.store.save_update(
+        UpdateJournal(
+            1,
+            lab.manifest.id,
+            "staged",
+            previous,
+            candidate,
+            ("application", "gateway"),
+            28080,
+        )
+    )
+    application = next(record for record in previous.resources if record.name.endswith("-app"))
+    docker.objects[application.object_id]["HostConfig"]["Memory"] = 0
+    removed_before = tuple(docker.removed)
+    candidate_ids = {record.object_id for record in candidate.resources}
+
+    with pytest.raises(PolicyError, match="resource limits differ"):
+        value._recover_update(lab)
+
+    assert tuple(docker.removed) == removed_before
+    assert candidate_ids.issubset(docker.objects)
+    assert value.store.load_update(lab.manifest.id) is not None
+
+
+def test_update_refuses_legacy_state_without_a_complete_policy_snapshot(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    legacy = dataclasses.replace(previous, schema_version=2, runtime_policy=None)
+    value.store.save(legacy)
+    pulls_before = tuple(docker.pulls)
+
+    with pytest.raises(PolicyError, match="complete containment rollback snapshot"):
+        value.activate_reviewed_update(lab)
+
+    assert tuple(docker.pulls) == pulls_before
+    assert value.store.load(lab.manifest.id) == legacy
+
+
+@pytest.mark.parametrize("operation", ["stop", "remove", "purge"])
+def test_cleanup_operations_accept_exact_owned_legacy_state(
+    xdg_paths: Paths, operation: str
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    current = value.store.load(lab.manifest.id)
+    assert current is not None
+    legacy = dataclasses.replace(current, schema_version=2, runtime_policy=None)
+    value.store.save(legacy)
+
+    result = getattr(value, operation)(lab)
+
+    if operation == "stop":
+        assert result.state == "stopped"
+        assert value.store.load(lab.manifest.id) == legacy
+        assert docker.objects
+        assert not any(
+            inspection.get("State", {}).get("Running") for inspection in docker.objects.values()
+        )
+    else:
+        assert result.state == "absent"
+        assert value.store.load(lab.manifest.id) is None
+        assert docker.objects == {}
 
 
 def test_next_start_recovers_exact_owned_partial_checkpoint(xdg_paths: Paths) -> None:
@@ -1396,7 +2129,7 @@ def test_status_reports_partially_running_layout_as_degraded(xdg_paths: Paths) -
     state = value.store.load(lab.manifest.id)
     assert state is not None
     application = next(record for record in state.resources if record.name.endswith("-app"))
-    docker.objects[application.object_id]["State"]["Running"] = False
+    docker.stop(application)
 
     assert value.status(lab).state == "degraded"
 
@@ -1421,8 +2154,74 @@ def test_status_fails_closed_after_a_required_network_is_disconnected(
     networks = docker.objects[container.object_id]["NetworkSettings"]["Networks"]
     networks.pop(next(name for name in networks if name.endswith("-net")))
 
-    with pytest.raises(PolicyError, match="lost its"):
+    with pytest.raises(PolicyError, match="lost a required network attachment"):
         value.status(lab)
+
+
+def test_status_rejects_extra_container_networks_and_foreign_endpoints(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    state = value.store.load(lab.manifest.id)
+    assert state is not None
+    application = next(record for record in state.resources if record.name.endswith("-app"))
+    internal = next(record for record in state.resources if record.name.endswith("-net"))
+
+    networks = docker.objects[application.object_id]["NetworkSettings"]["Networks"]
+    networks["foreign"] = {"NetworkID": "f" * 64}
+    with pytest.raises(PolicyError, match="unreviewed network attachment"):
+        value.status(lab)
+    networks.pop("foreign")
+
+    docker.objects[internal.object_id]["Containers"]["f" * 64] = {"Name": "foreign"}
+    with pytest.raises(PolicyError, match="endpoints differ"):
+        value.status(lab)
+
+
+def test_cleanup_rejects_stopped_foreign_configured_network_consumer(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    state = value.store.load(lab.manifest.id)
+    assert state is not None
+    internal = next(record for record in state.resources if record.name.endswith("-net"))
+    foreign_id = "f" * 64
+    docker.objects[foreign_id] = {
+        "Id": foreign_id,
+        "Name": "/foreign-stopped-container",
+        "Config": {"Labels": {}, "Image": "unrelated@example"},
+        "HostConfig": {},
+        "NetworkSettings": {"Networks": {internal.name: {"NetworkID": internal.object_id}}},
+        "State": {"Running": False},
+    }
+    removed_before = tuple(docker.removed)
+
+    with pytest.raises(PolicyError, match="configured on an unowned container"):
+        value.remove(lab)
+
+    assert tuple(docker.removed) == removed_before
+    assert foreign_id in docker.objects
+    assert value.store.load(lab.manifest.id) == state
+
+
+def test_repeated_up_repairs_only_a_missing_reviewed_network_attachment(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    started = value.up(lab, host_port=18080)
+    state = value.store.load(lab.manifest.id)
+    assert state is not None
+    gateway = next(record for record in state.resources if record.name.endswith("-gateway"))
+    internal = next(record for record in state.resources if record.name.endswith("-net"))
+    docker.objects[gateway.object_id]["NetworkSettings"]["Networks"].pop(internal.name)
+    docker.objects[internal.object_id]["Containers"].pop(gateway.object_id)
+
+    recovered = value.up(lab, host_port=18080)
+
+    assert recovered.run_id == started.run_id
+    assert docker.network_connected(internal, gateway)
 
 
 def test_acknowledged_required_egress_attaches_only_app_to_reviewed_ingress(

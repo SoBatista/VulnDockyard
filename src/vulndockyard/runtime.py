@@ -17,10 +17,10 @@ from typing import Any
 
 from .catalogue import Catalogue, ReviewedLab, identity, template_identity
 from .docker import MINIMUM_ENGINE_TEXT, ROLE, SEED_READY_MARKER, Docker, Ownership
-from .errors import IntegrityError, PolicyError, PreflightError
+from .errors import IntegrityError, PolicyError, PreflightError, VulnDockyardError
 from .models import DIGEST, OCI_NAME, AdapterStatus, EphemeralMount, Image
 from .paths import Paths
-from .state import ResourceRecord, RunState, StateStore, UpdateJournal
+from .state import ResourceRecord, RunState, RuntimePolicySnapshot, StateStore, UpdateJournal
 
 
 @dataclass(frozen=True)
@@ -103,6 +103,24 @@ def _resource_limits(lab: ReviewedLab) -> tuple[int, float, int, bool]:
     if not read_only:
         raise PolicyError("runnable application root filesystem must be read-only")
     return memory, float(cpus), pids, read_only
+
+
+def _runtime_policy(lab: ReviewedLab) -> RuntimePolicySnapshot:
+    memory, cpus, pids, read_only = _resource_limits(lab)
+    timeout = lab.manifest.raw["health_check"]["timeout_seconds"]
+    if not isinstance(timeout, int) or isinstance(timeout, bool):
+        raise IntegrityError("manifest health-check timeout is malformed")
+    return RuntimePolicySnapshot(
+        memory,
+        cpus,
+        pids,
+        read_only,
+        lab.manifest.outbound_required,
+        lab.manifest.ephemeral_storage,
+        lab.manifest.friendly_hostname,
+        timeout,
+        lab.manifest.services,
+    )
 
 
 def _application_image(lab: ReviewedLab) -> Image:
@@ -256,6 +274,8 @@ class Runtime:
         *,
         current_identity: str | None = None,
         lab: ReviewedLab | None = None,
+        repair_missing_networks: bool = False,
+        enforce_policy: bool = False,
     ) -> tuple[dict[str, Any], ...]:
         if current_identity is not None and state.manifest_identity != current_identity:
             raise PolicyError(
@@ -265,17 +285,20 @@ class Runtime:
         inspections = tuple(
             self.docker.validate_owned(record, ownership) for record in state.resources
         )
+        policy = state.runtime_policy if enforce_policy else None
         if lab is not None and state.manifest_identity == lab.manifest_identity:
+            reviewed_policy = _runtime_policy(lab)
+            if policy is not None and policy != reviewed_policy:
+                raise PolicyError("runtime policy snapshot differs from the reviewed manifest")
+            policy = reviewed_policy
+        if policy is not None:
             prefix = f"vdy-{state.lab_id}-{state.run_id[:12]}"
-            mounts = {
-                f"{prefix}-volume-{mount.name}": mount
-                for mount in lab.manifest.ephemeral_storage.seeded
-            }
+            storage = policy.ephemeral_storage
+            mounts = {f"{prefix}-volume-{mount.name}": mount for mount in storage.seeded}
             volumes = [record for record in state.resources if record.kind == "volume"]
             unexpected = {record.name for record in volumes}.difference(mounts)
             if unexpected:
                 raise PolicyError("managed runtime contains unreviewed seeded storage")
-            storage = lab.manifest.ephemeral_storage
             for record in volumes:
                 self.docker.validate_ephemeral_volume(
                     record,
@@ -297,14 +320,13 @@ class Runtime:
                     )
             app_name = f"{prefix}-app"
             if app_name in inspections_by_name:
-                memory, cpus, pids, _ = _resource_limits(lab)
                 self.docker.validate_application_policy(
                     inspections_by_name[app_name],
                     image=state.requested_reference,
                     network=f"{prefix}-net",
-                    memory_mb=memory,
-                    cpus=cpus,
-                    pids=pids,
+                    memory_mb=policy.memory_mb,
+                    cpus=policy.cpus,
+                    pids=policy.pids,
                     seeded_mounts=tuple(
                         (records_by_name[name], mount) for name, mount in mounts.items()
                     ),
@@ -312,17 +334,6 @@ class Runtime:
                     storage_uid=storage.uid,
                     storage_gid=storage.gid,
                 )
-                internal = records_by_name.get(f"{prefix}-net")
-                if internal is None or not self.docker.network_connected(
-                    internal, records_by_name[app_name]
-                ):
-                    raise PolicyError("managed application lost its isolated network attachment")
-                if lab.manifest.outbound_required:
-                    ingress = records_by_name.get(f"{prefix}-ingress")
-                    if ingress is None or not self.docker.network_connected(
-                        ingress, records_by_name[app_name]
-                    ):
-                        raise PolicyError("managed application lost its reviewed egress attachment")
             gateway_name = f"{prefix}-gateway"
             if gateway_name in inspections_by_name:
                 if state.gateway_reference is None or state.upstream_port is None:
@@ -334,15 +345,95 @@ class Runtime:
                     upstream_port=state.upstream_port,
                     host_port=state.host_port,
                 )
-                gateway_record = records_by_name[gateway_name]
-                for suffix in ("ingress", "net"):
-                    network = records_by_name.get(f"{prefix}-{suffix}")
-                    if network is None or not self.docker.network_connected(
-                        network, gateway_record
-                    ):
-                        raise PolicyError(
-                            f"managed gateway lost its reviewed {suffix} network attachment"
-                        )
+
+            app_record = records_by_name.get(app_name)
+            gateway_record = records_by_name.get(gateway_name)
+            internal = records_by_name.get(f"{prefix}-net")
+            ingress = records_by_name.get(f"{prefix}-ingress")
+            expected_by_container: tuple[
+                tuple[ResourceRecord | None, tuple[ResourceRecord | None, ...]], ...
+            ] = (
+                (
+                    app_record,
+                    (internal, ingress) if policy.outbound_required else (internal,),
+                ),
+                (gateway_record, (ingress, internal)),
+            )
+            for container, expected_values in expected_by_container:
+                if container is None:
+                    continue
+                if any(network is None for network in expected_values):
+                    raise PolicyError("managed runtime lacks a required network record")
+                expected_networks = {
+                    network.name: network.object_id
+                    for network in expected_values
+                    if network is not None
+                }
+                actual_networks = self.docker.container_networks(
+                    inspections_by_name[container.name]
+                )
+                unexpected_networks = set(actual_networks).difference(expected_networks)
+                wrong_identities = {
+                    name
+                    for name in actual_networks.keys() & expected_networks.keys()
+                    if actual_networks[name] and actual_networks[name] != expected_networks[name]
+                }
+                if unexpected_networks or wrong_identities:
+                    raise PolicyError("managed container has an unreviewed network attachment")
+                missing_networks = set(expected_networks).difference(actual_networks)
+                if missing_networks and not repair_missing_networks:
+                    raise PolicyError("managed container lost a required network attachment")
+                for name in sorted(missing_networks):
+                    network = records_by_name[name]
+                    self._ensure_network_connected(network, container)
+
+            expected_endpoints = {
+                f"{prefix}-net": {
+                    record.object_id
+                    for record in (app_record, gateway_record)
+                    if record is not None and self._running(inspections_by_name[record.name])
+                },
+                f"{prefix}-ingress": {
+                    record.object_id
+                    for record in (
+                        gateway_record,
+                        app_record if policy.outbound_required else None,
+                    )
+                    if record is not None and self._running(inspections_by_name[record.name])
+                },
+            }
+            for name, expected_container_ids in expected_endpoints.items():
+                endpoint_network = records_by_name.get(name)
+                if endpoint_network is None:
+                    continue
+                inspection = self.docker.validate_owned(endpoint_network, ownership)
+                self.docker.validate_network_endpoints(
+                    inspection, expected_container_ids=expected_container_ids
+                )
+            expected_configured_consumers = {
+                f"{prefix}-net": {
+                    record.object_id
+                    for record in (app_record, gateway_record)
+                    if record is not None
+                },
+                f"{prefix}-ingress": {
+                    record.object_id
+                    for record in (
+                        gateway_record,
+                        app_record if policy.outbound_required else None,
+                    )
+                    if record is not None
+                },
+            }
+            for name, expected_container_ids in expected_configured_consumers.items():
+                configured_network = records_by_name.get(name)
+                if configured_network is None:
+                    continue
+                actual_container_ids = self.docker.configured_network_consumers(configured_network)
+                if actual_container_ids != expected_container_ids:
+                    raise PolicyError(
+                        "Docker network configured consumers differ from the exact managed topology"
+                    )
         return inspections
 
     def _assert_no_orphans(
@@ -371,12 +462,12 @@ class Runtime:
             )
 
     def _health(self, lab: ReviewedLab, port: int) -> None:
-        reviewed_timeout = lab.manifest.raw["health_check"]["timeout_seconds"]
-        if not isinstance(reviewed_timeout, int) or isinstance(reviewed_timeout, bool):
-            raise IntegrityError("manifest health-check timeout is malformed")
-        health_timeout = min(self.docker.timeouts.health, float(reviewed_timeout))
+        self._health_snapshot(_runtime_policy(lab), port)
+
+    def _health_snapshot(self, policy: RuntimePolicySnapshot, port: int) -> None:
+        health_timeout = min(self.docker.timeouts.health, float(policy.health_timeout_seconds))
         deadline = time.monotonic() + health_timeout
-        for service in lab.manifest.services:
+        for service in policy.services:
             identity = service.identity_regex
             if len(identity) > 160 or not identity.isprintable():
                 raise IntegrityError("health identity marker is unsafe")
@@ -384,7 +475,7 @@ class Runtime:
             request = urllib.request.Request(  # noqa: S310 - local http URL only
                 self.local_url(port, service.health_path),
                 headers={
-                    "Host": lab.manifest.friendly_hostname,
+                    "Host": policy.friendly_hostname,
                     "User-Agent": "VulnDockyard/1",
                 },
                 method="GET",
@@ -440,14 +531,15 @@ class Runtime:
             for record, inspection in zip(state.resources, inspections, strict=True)
             if record.kind == "volume"
         }
-        expected_volume_roles = {
-            f"volume-{mount.name}" for mount in lab.manifest.ephemeral_storage.seeded
-        }
-        storage_matches = (
-            volume_roles == expected_volume_roles
-            if state.manifest_identity == lab.manifest_identity
-            else all(isinstance(role, str) and role.startswith("volume-") for role in volume_roles)
+        policy = state.runtime_policy
+        if policy is None and state.manifest_identity == lab.manifest_identity:
+            policy = _runtime_policy(lab)
+        expected_volume_roles = (
+            {f"volume-{mount.name}" for mount in policy.ephemeral_storage.seeded}
+            if policy is not None
+            else set()
         )
+        storage_matches = policy is not None and volume_roles == expected_volume_roles
         return (
             kinds.count("container") == 2
             and kinds.count("network") == 2
@@ -469,6 +561,10 @@ class Runtime:
             )
             lines = tuple((result.stdout + result.stderr).splitlines())
             if SEED_READY_MARKER in lines:
+                if not self._running(inspection):
+                    raise PreflightError(
+                        "ephemeral storage seeder exited after reporting readiness"
+                    )
                 return
             last_output = " | ".join(lines[-3:])
             if not self._running(inspection):
@@ -487,10 +583,18 @@ class Runtime:
         lab: ReviewedLab,
         state: RunState,
         inspections: tuple[dict[str, Any], ...],
+        *,
+        start_gateway: bool = True,
+        on_checkpoint: Callable[[RunState], None] | None = None,
     ) -> None:
         """Restore tmpfs-backed seed data before restarting a stopped application."""
         ownership = Ownership.from_state(state)
-        storage = lab.manifest.ephemeral_storage
+        policy = state.runtime_policy
+        if policy is None and state.manifest_identity == lab.manifest_identity:
+            policy = _runtime_policy(lab)
+        if policy is None:
+            raise PolicyError("runtime lacks the storage policy required for safe reseeding")
+        storage = policy.ephemeral_storage
         prefix = f"vdy-{state.lab_id}-{state.run_id[:12]}"
         volumes = {record.name: record for record in state.resources if record.kind == "volume"}
         seeded_mounts = tuple(
@@ -505,6 +609,12 @@ class Runtime:
         gateway = containers.get("gateway")
         if application is None or gateway is None:
             raise IntegrityError("managed runtime lacks its application or gateway container")
+
+        def checkpoint(current: RunState) -> None:
+            self.store.save(current)
+            if on_checkpoint is not None:
+                on_checkpoint(current)
+
         seeder: ResourceRecord | None = None
         try:
             if seeded_mounts:
@@ -516,18 +626,28 @@ class Runtime:
                     uid=storage.uid,
                     gid=storage.gid,
                 )
-                self.store.save(replace(state, resources=(*state.resources, seeder)))
+                checkpoint(replace(state, resources=(*state.resources, seeder)))
                 self.docker.start(seeder)
-                self.store.save(replace(state, resources=(*state.resources, seeder)))
+                checkpoint(replace(state, resources=(*state.resources, seeder)))
                 self._wait_for_seeder(seeder, ownership)
+                if not self._running(self.docker.validate_owned(seeder, ownership)):
+                    raise PreflightError(
+                        "ephemeral storage seeder stopped before application start"
+                    )
             self.docker.start(application)
+            if not self._running(self.docker.validate_owned(application, ownership)):
+                raise PreflightError("application did not remain running after Docker start")
             if seeder is not None:
-                self.docker.validate_owned(seeder, ownership)
+                if not self._running(self.docker.validate_owned(seeder, ownership)):
+                    raise PreflightError(
+                        "ephemeral storage seeder stopped while application started"
+                    )
                 self.docker.remove(seeder)
                 seeder = None
-                self.store.save(state)
-            self.docker.start(gateway)
-            self.store.save(state)
+                checkpoint(state)
+            if start_gateway:
+                self.docker.start(gateway)
+            checkpoint(state)
         except BaseException:
             for record in (gateway, application):
                 with contextlib.suppress(Exception):
@@ -540,7 +660,7 @@ class Runtime:
                     if self.docker.exists(seeder.kind, seeder.object_id):
                         self.docker.validate_owned(seeder, ownership)
                         self.docker.remove(seeder)
-            self.store.save(state)
+            checkpoint(state)
             raise
 
     def _create_run(
@@ -577,6 +697,7 @@ class Runtime:
                 resources=tuple(resources),
                 gateway_reference=gateway.reference,
                 upstream_port=lab.manifest.services[0].internal_port,
+                runtime_policy=_runtime_policy(lab),
                 created_at=created_at,
             )
 
@@ -654,16 +775,28 @@ class Runtime:
             if lab.manifest.outbound_required:
                 # Egress remains available only through the reviewed ingress network.
                 self._ensure_network_connected(ingress, application)
+            if seeder is not None and not self._running(
+                self.docker.validate_owned(seeder, ownership)
+            ):
+                raise PreflightError("ephemeral storage seeder stopped before application start")
             self.docker.start(application)
+            if not self._running(self.docker.validate_owned(application, ownership)):
+                raise PreflightError("application did not remain running after Docker start")
             checkpoint()
             if seeder is not None:
-                self.docker.validate_owned(seeder, ownership)
+                if not self._running(self.docker.validate_owned(seeder, ownership)):
+                    raise PreflightError(
+                        "ephemeral storage seeder stopped while application started"
+                    )
                 self.docker.remove(seeder)
                 resources.remove(seeder)
                 checkpoint()
             self.docker.start(gateway_record)
             state = checkpoint()
             self._health(lab, host_port)
+            inspections = self._validate_state(state, lab=lab, enforce_policy=True)
+            if not self._complete_layout(lab, state, inspections):
+                raise IntegrityError("new runtime failed its exact steady-state layout check")
         except BaseException:
             # Cover the narrow create-to-checkpoint window: an exact managed
             # object may exist even when its create call never returned to append
@@ -754,6 +887,9 @@ class Runtime:
             if adopted != existing:
                 self.store.save(adopted)
                 existing = adopted
+            existing, discarded_seeder = self._discard_rollback_seeder(existing)
+            if discarded_seeder:
+                self.store.save(existing)
         self._assert_single_lab(lab.manifest.id, allow_multiple)
         self._assert_no_orphans(lab.manifest.id, existing)
         if existing is not None:
@@ -768,7 +904,12 @@ class Runtime:
             inspections = (
                 ()
                 if missing
-                else self._validate_state(existing, current_identity=lab.manifest_identity, lab=lab)
+                else self._validate_state(
+                    existing,
+                    current_identity=lab.manifest_identity,
+                    lab=lab,
+                    repair_missing_networks=True,
+                )
             )
             if missing or not self._complete_layout(lab, existing, inspections):
                 self._cleanup(existing)
@@ -838,7 +979,7 @@ class Runtime:
 
     def status(self, lab: ReviewedLab) -> RuntimeStatus:
         with self._lifecycle():
-            self._recover_update(lab)
+            self._refuse_pending_update_for_observation(lab)
             return self._status(lab)
 
     def _status(self, lab: ReviewedLab) -> RuntimeStatus:
@@ -856,10 +997,11 @@ class Runtime:
                 False,
                 (),
             )
+        self._assert_no_orphans(lab.manifest.id, state)
         return self._status_from_state(lab, state)
 
     def _status_from_state(self, lab: ReviewedLab, state: RunState) -> RuntimeStatus:
-        inspections = self._validate_state(state, lab=lab)
+        inspections = self._validate_state(state, lab=lab, enforce_policy=True)
         resource_status: list[dict[str, str]] = []
         running_values: list[bool] = []
         actual_images: dict[str, str] = {}
@@ -921,6 +1063,11 @@ class Runtime:
 
     def _adopt_journaled_candidate(self, lab: ReviewedLab, state: RunState) -> RunState:
         """Adopt only exact intended names with every journaled ownership label."""
+        policy = state.runtime_policy
+        if policy is None and state.manifest_identity == lab.manifest_identity:
+            policy = _runtime_policy(lab)
+        if policy is None:
+            raise PolicyError("journaled runtime lacks its containment policy snapshot")
         ownership = Ownership.from_state(state)
         prefix = f"vdy-{state.lab_id}-{state.run_id[:12]}"
         expected = (
@@ -928,7 +1075,7 @@ class Runtime:
             ("network", f"{prefix}-ingress"),
             *(
                 ("volume", f"{prefix}-volume-{mount.name}")
-                for mount in lab.manifest.ephemeral_storage.seeded
+                for mount in policy.ephemeral_storage.seeded
             ),
             ("container", f"{prefix}-seeder"),
             ("container", f"{prefix}-app"),
@@ -947,6 +1094,11 @@ class Runtime:
             for object_id in managed[kind]:
                 if (kind, object_id) in recorded_ids:
                     continue
+                # Discovery is only a hint.  Require an exact currently existing
+                # identifier before inspecting it so a shortened/ambiguous Docker
+                # ID can never be adopted as owned state.
+                if not self.docker.exists(kind, object_id):
+                    continue
                 inspection = self.docker.inspect(kind, object_id)
                 raw_name = inspection.get("Name")
                 name = raw_name.removeprefix("/") if isinstance(raw_name, str) else ""
@@ -958,15 +1110,15 @@ class Runtime:
                     storage_name = name.removeprefix(f"{prefix}-volume-")
                     mount = next(
                         value
-                        for value in lab.manifest.ephemeral_storage.seeded
+                        for value in policy.ephemeral_storage.seeded
                         if value.name == storage_name
                     )
                     self.docker.validate_ephemeral_volume(
                         record,
                         ownership,
                         mount,
-                        uid=lab.manifest.ephemeral_storage.uid,
-                        gid=lab.manifest.ephemeral_storage.gid,
+                        uid=policy.ephemeral_storage.uid,
+                        gid=policy.ephemeral_storage.gid,
                     )
                 records.append(record)
                 names.add((kind, name))
@@ -974,7 +1126,100 @@ class Runtime:
         records.sort(key=lambda record: order.get((record.kind, record.name), len(order)))
         return replace(state, resources=tuple(records))
 
-    def _adopt_rollback_gateway(self, state: RunState) -> RunState:
+    @staticmethod
+    def _seeded_mounts_from_snapshot(
+        state: RunState, policy: RuntimePolicySnapshot
+    ) -> tuple[tuple[ResourceRecord, EphemeralMount], ...]:
+        prefix = f"vdy-{state.lab_id}-{state.run_id[:12]}"
+        volumes = {record.name: record for record in state.resources if record.kind == "volume"}
+        try:
+            return tuple(
+                (volumes[f"{prefix}-volume-{mount.name}"], mount)
+                for mount in policy.ephemeral_storage.seeded
+            )
+        except KeyError as exc:
+            raise IntegrityError("rollback state lacks a reviewed seeded volume") from exc
+
+    def _adopt_rollback_seeder(self, state: RunState, *, validate_policy: bool) -> RunState:
+        """Adopt a transient prior-run seeder across every journal crash window."""
+        policy = state.runtime_policy
+        if policy is None:
+            raise PolicyError("rollback state lacks its containment policy snapshot")
+        prefix = f"vdy-{state.lab_id}-{state.run_id[:12]}"
+        expected_name = f"{prefix}-seeder"
+        ownership = Ownership.from_state(state)
+        recorded = [
+            record
+            for record in state.resources
+            if record.kind == "container" and record.name == expected_name
+        ]
+        if len(recorded) > 1:
+            raise IntegrityError("rollback state contains duplicate transient seeders")
+        matches: list[ResourceRecord] = []
+        if recorded and self.docker.exists("container", recorded[0].object_id):
+            matches.append(recorded[0])
+        for object_id in self.docker.managed_resources(lab_id=state.lab_id)["container"]:
+            if any(record.object_id == object_id for record in matches):
+                continue
+            if not self.docker.exists("container", object_id):
+                continue
+            inspection = self.docker.inspect("container", object_id)
+            raw_name = inspection.get("Name")
+            name = raw_name.removeprefix("/") if isinstance(raw_name, str) else ""
+            if name == expected_name:
+                matches.append(ResourceRecord("container", name, object_id))
+        if len(matches) > 1:
+            raise IntegrityError("multiple exact transient seeders match the rollback snapshot")
+        resources = tuple(record for record in state.resources if record not in recorded)
+        if not matches:
+            return replace(state, resources=resources)
+        seeder = matches[0]
+        inspection = self.docker.validate_owned(seeder, ownership)
+        if validate_policy:
+            storage = policy.ephemeral_storage
+            self.docker.validate_seeder_policy(
+                inspection,
+                image=state.requested_reference,
+                seeded_mounts=self._seeded_mounts_from_snapshot(state, policy),
+                uid=storage.uid,
+                gid=storage.gid,
+            )
+        return replace(state, resources=(*resources, seeder))
+
+    def _discard_rollback_seeder(self, state: RunState) -> tuple[RunState, bool]:
+        prefix = f"vdy-{state.lab_id}-{state.run_id[:12]}"
+        seeder_name = f"{prefix}-seeder"
+        seeders = [
+            record
+            for record in state.resources
+            if record.kind == "container" and record.name == seeder_name
+        ]
+        if len(seeders) > 1:
+            raise IntegrityError("rollback state contains duplicate transient seeders")
+        if not seeders:
+            return state, False
+        ownership = Ownership.from_state(state)
+        applications = [
+            record
+            for record in state.resources
+            if record.kind == "container" and record.name == f"{prefix}-app"
+        ]
+        if len(applications) == 1 and self.docker.exists(
+            applications[0].kind, applications[0].object_id
+        ):
+            inspection = self.docker.validate_owned(applications[0], ownership)
+            if self._running(inspection):
+                self.docker.stop(applications[0])
+        seeder = seeders[0]
+        if self.docker.exists(seeder.kind, seeder.object_id):
+            self.docker.validate_owned(seeder, ownership)
+            self.docker.remove(seeder)
+        return replace(
+            state,
+            resources=tuple(record for record in state.resources if record != seeder),
+        ), True
+
+    def _adopt_rollback_gateway(self, state: RunState, *, validate_policy: bool = True) -> RunState:
         """Recover an exact prior gateway created between rollback checkpoints."""
         if state.gateway_reference is None or state.upstream_port is None:
             raise PolicyError("prior runtime lacks a gateway rollback snapshot")
@@ -994,13 +1239,14 @@ class Runtime:
         old_gateway = gateways[0]
         if self.docker.exists(old_gateway.kind, old_gateway.object_id):
             inspection = self.docker.validate_owned(old_gateway, ownership)
-            self.docker.validate_gateway_policy(
-                inspection,
-                image=state.gateway_reference,
-                network=ingress_values[0].name,
-                upstream_port=state.upstream_port,
-                host_port=state.host_port,
-            )
+            if validate_policy:
+                self.docker.validate_gateway_policy(
+                    inspection,
+                    image=state.gateway_reference,
+                    network=ingress_values[0].name,
+                    upstream_port=state.upstream_port,
+                    host_port=state.host_port,
+                )
             return state
 
         matches: list[ResourceRecord] = []
@@ -1012,13 +1258,14 @@ class Runtime:
                 continue
             record = ResourceRecord("container", name, object_id)
             inspection = self.docker.validate_owned(record, ownership)
-            self.docker.validate_gateway_policy(
-                inspection,
-                image=state.gateway_reference,
-                network=ingress_values[0].name,
-                upstream_port=state.upstream_port,
-                host_port=state.host_port,
-            )
+            if validate_policy:
+                self.docker.validate_gateway_policy(
+                    inspection,
+                    image=state.gateway_reference,
+                    network=ingress_values[0].name,
+                    upstream_port=state.upstream_port,
+                    host_port=state.host_port,
+                )
             matches.append(record)
         if len(matches) > 1:
             raise IntegrityError("multiple exact prior gateways match the rollback snapshot")
@@ -1034,8 +1281,14 @@ class Runtime:
     def _restore_previous_update(self, lab: ReviewedLab, journal: UpdateJournal) -> RunState:
         candidate = self._adopt_journaled_candidate(lab, journal.candidate)
         previous = self._adopt_rollback_gateway(journal.previous)
+        previous = self._adopt_rollback_seeder(previous, validate_policy=True)
         journal = replace(journal, candidate=candidate, previous=previous)
         self.store.save_update(journal)
+        previous, discarded_seeder = self._discard_rollback_seeder(previous)
+        if discarded_seeder:
+            journal = replace(journal, previous=previous)
+            self.store.save(previous)
+            self.store.save_update(journal)
         if previous.gateway_reference is None or previous.upstream_port is None:
             raise PolicyError("prior runtime lacks a bounded gateway rollback snapshot")
         ownership = Ownership.from_state(previous)
@@ -1060,9 +1313,6 @@ class Runtime:
         if self.docker.exists(old_gateway.kind, old_gateway.object_id):
             self.docker.validate_owned(old_gateway, ownership)
 
-        # Validate both sides of the recovery boundary before removing either.
-        self._cleanup(candidate, coexisting=(previous,))
-
         ingress = next(
             record
             for record in previous.resources
@@ -1073,6 +1323,26 @@ class Runtime:
             for record in previous.resources
             if record.kind == "network" and record.name.endswith("-net")
         )
+        if self.docker.exists(old_gateway.kind, old_gateway.object_id):
+            self._ensure_network_connected(internal, old_gateway)
+
+        # Validate the preserved side against its recorded policy before removing
+        # the candidate. A cutover can legitimately have removed the old gateway,
+        # so validate the exact surviving topology in that phase and validate the
+        # complete topology again after recreating it.
+        rollback_base = (
+            previous
+            if self.docker.exists(old_gateway.kind, old_gateway.object_id)
+            else replace(
+                previous,
+                resources=tuple(record for record in previous.resources if record != old_gateway),
+            )
+        )
+        self._validate_state(rollback_base, enforce_policy=True)
+
+        # Both sides of the recovery boundary are now ownership-validated and the
+        # surviving rollback base is policy-validated.
+        self._cleanup(candidate, coexisting=(previous,))
         if self.docker.exists(old_gateway.kind, old_gateway.object_id):
             restored_gateway = old_gateway
         else:
@@ -1096,16 +1366,46 @@ class Runtime:
 
         self._ensure_network_connected(internal, restored_gateway)
 
-        inspections = self._validate_state(previous)
-        for record, inspection in zip(previous.resources, inspections, strict=True):
-            if record.kind != "container":
-                continue
-            role = self.docker._labels(record.kind, inspection).get(ROLE)
-            should_run = role in journal.running_roles
-            if should_run and not self._running(inspection):
-                self.docker.start(record)
-            elif not should_run and self._running(inspection):
+        inspections = self._validate_state(previous, enforce_policy=True)
+        by_role = {
+            self.docker._labels(record.kind, inspection).get(ROLE): (record, inspection)
+            for record, inspection in zip(previous.resources, inspections, strict=True)
+            if record.kind == "container"
+        }
+        application = by_role.get("application")
+        gateway = by_role.get("gateway")
+        if application is None or gateway is None:
+            raise IntegrityError("rollback runtime lacks its application or gateway")
+        for role, (record, inspection) in by_role.items():
+            if role not in journal.running_roles and self._running(inspection):
                 self.docker.stop(record)
+        application_should_run = "application" in journal.running_roles
+        gateway_should_run = "gateway" in journal.running_roles
+        if application_should_run and not self._running(application[1]):
+
+            def checkpoint_previous(current: RunState) -> None:
+                nonlocal journal, previous
+                previous = current
+                journal = replace(journal, previous=current)
+                self.store.save_update(journal)
+
+            self._reseed_and_start(
+                lab,
+                previous,
+                inspections,
+                start_gateway=gateway_should_run,
+                on_checkpoint=checkpoint_previous,
+            )
+        elif gateway_should_run and not self._running(gateway[1]):
+            self.docker.start(gateway[0])
+        final_inspections = self._validate_state(previous, enforce_policy=True)
+        if not self._complete_layout(lab, previous, final_inspections):
+            raise IntegrityError("rollback runtime failed its exact steady-state layout check")
+        if application_should_run and gateway_should_run:
+            policy = previous.runtime_policy
+            if policy is None:  # pragma: no cover - journal parsing requires this snapshot
+                raise IntegrityError("rollback runtime lost its health policy snapshot")
+            self._health_snapshot(policy, previous.host_port)
         self.store.save(previous)
         self.store.delete_update(previous.lab_id)
         return previous
@@ -1117,15 +1417,104 @@ class Runtime:
         if journal.phase == "ready" and (
             journal.candidate.manifest_identity == lab.manifest_identity
         ):
-            candidate = self._adopt_journaled_candidate(lab, journal.candidate)
-            self._assert_no_orphans(lab.manifest.id, candidate, coexisting=(journal.previous,))
-            status = self._status_from_state(lab, candidate)
-            if status.lock_match and status.trusted_run:
-                self.store.save(candidate)
-                self._cleanup(journal.previous, coexisting=(candidate,))
-                self.store.delete_update(lab.manifest.id)
-                return
+            try:
+                candidate = self._adopt_journaled_candidate(lab, journal.candidate)
+                self._assert_no_orphans(lab.manifest.id, candidate, coexisting=(journal.previous,))
+                status = self._status_from_state(lab, candidate)
+                candidate_inspections = self._validate_state(candidate, lab=lab)
+                actual_running_roles = {
+                    self.docker._labels(record.kind, inspection).get(ROLE)
+                    for record, inspection in zip(
+                        candidate.resources, candidate_inspections, strict=True
+                    )
+                    if record.kind == "container" and self._running(inspection)
+                }
+                expected_running_roles = set(journal.running_roles)
+                if not (
+                    status.lock_match
+                    and status.trusted_run
+                    and actual_running_roles == expected_running_roles
+                ):
+                    raise PreflightError(
+                        "ready update candidate no longer matches its preserved running state"
+                    )
+                if expected_running_roles == {"application", "gateway"}:
+                    policy = candidate.runtime_policy
+                    if policy is None:  # pragma: no cover - journal parsing requires it
+                        raise IntegrityError("candidate lost its health policy snapshot")
+                    self._health_snapshot(policy, candidate.host_port)
+            except VulnDockyardError as candidate_error:
+                try:
+                    self._restore_previous_update(lab, journal)
+                except VulnDockyardError as rollback_error:
+                    raise PreflightError(
+                        "ready update candidate failed validation or readiness and rollback "
+                        f"also failed; update journal retained: {rollback_error}"
+                    ) from candidate_error
+                raise PreflightError(
+                    "ready update candidate failed validation or readiness; "
+                    "prior deployment restored"
+                ) from candidate_error
+            self.store.save(candidate)
+            self._cleanup(journal.previous, coexisting=(candidate,))
+            self.store.delete_update(lab.manifest.id)
+            return
         self._restore_previous_update(lab, journal)
+
+    def _recover_update_for_cleanup(self, lab: ReviewedLab) -> None:
+        """Resolve an interrupted update without creating or starting anything."""
+        journal = self.store.load_update(lab.manifest.id)
+        if journal is None:
+            return
+        candidate = self._adopt_journaled_candidate(lab, journal.candidate)
+        if journal.phase == "ready" and candidate.manifest_identity == lab.manifest_identity:
+            self._assert_no_orphans(lab.manifest.id, candidate, coexisting=(journal.previous,))
+            self.store.save(candidate)
+            self._cleanup(journal.previous, coexisting=(candidate,))
+            self.store.delete_update(lab.manifest.id)
+            return
+
+        previous = self._adopt_rollback_gateway(journal.previous, validate_policy=False)
+        previous = self._adopt_rollback_seeder(previous, validate_policy=False)
+        journal = replace(journal, previous=previous, candidate=candidate)
+        self.store.save_update(journal)
+        previous, discarded_seeder = self._discard_rollback_seeder(previous)
+        if discarded_seeder:
+            journal = replace(journal, previous=previous)
+            self.store.save_update(journal)
+        self._cleanup(candidate, coexisting=(previous,))
+        ownership = Ownership.from_state(previous)
+        surviving: list[ResourceRecord] = []
+        for record in previous.resources:
+            if not self.docker.exists(record.kind, record.object_id):
+                continue
+            self.docker.validate_owned(record, ownership)
+            surviving.append(record)
+        previous = replace(previous, resources=tuple(surviving))
+        self.store.save(previous)
+        self.store.delete_update(lab.manifest.id)
+
+    def _refuse_pending_update_for_observation(self, lab: ReviewedLab) -> None:
+        if self.store.load_update(lab.manifest.id) is not None:
+            raise PolicyError(
+                "an interrupted update is pending; status, logs, open, and verify never recover "
+                "it because recovery may execute a lab. Use up, update, or restart for explicit "
+                "execution recovery, or stop, remove, or purge for cleanup-only recovery"
+            )
+
+    def _recover_runtime_transients_for_cleanup(self, lab: ReviewedLab) -> None:
+        state = self.store.load(lab.manifest.id)
+        # Schema v1/v2 state predates the complete policy snapshot needed to
+        # recognize transient seeders.  It is deliberately ineligible for
+        # execution/update recovery, but its exact recorded IDs and ownership
+        # labels remain sufficient for stop/remove/purge cleanup.
+        if state is None or state.runtime_policy is None:
+            return
+        adopted = self._adopt_journaled_candidate(lab, state)
+        adopted = self._adopt_rollback_seeder(adopted, validate_policy=False)
+        adopted, _ = self._discard_rollback_seeder(adopted)
+        if adopted != state:
+            self.store.save(adopted)
 
     def activate_reviewed_update(self, lab: ReviewedLab) -> RuntimeUpdate:
         """Activate only an installed reviewed candidate that differs from runtime state."""
@@ -1160,14 +1549,18 @@ class Runtime:
                 raise PolicyError(
                     "an untrusted development runtime cannot be used as an update rollback base"
                 )
-            if previous.gateway_reference is None or previous.upstream_port is None:
+            if (
+                previous.gateway_reference is None
+                or previous.upstream_port is None
+                or previous.runtime_policy is None
+            ):
                 raise PolicyError(
-                    "prior runtime predates the bounded rollback snapshot; it cannot be updated "
-                    "transactionally"
+                    "prior runtime predates the complete containment rollback snapshot; "
+                    "it cannot be updated transactionally"
                 )
 
             self._assert_no_orphans(lab.manifest.id, previous)
-            previous_inspections = self._validate_state(previous)
+            previous_inspections = self._validate_state(previous, enforce_policy=True)
             if not self._complete_layout(lab, previous, previous_inspections):
                 raise PolicyError("prior runtime is incomplete and cannot be a safe rollback base")
             running_roles = tuple(
@@ -1204,6 +1597,7 @@ class Runtime:
                 resources=(),
                 gateway_reference=_gateway_image(lab).reference,
                 upstream_port=lab.manifest.services[0].internal_port,
+                runtime_policy=_runtime_policy(lab),
                 created_at=candidate_created_at,
             )
             journal = UpdateJournal(
@@ -1346,7 +1740,8 @@ class Runtime:
 
     def stop(self, lab: ReviewedLab) -> RuntimeStatus:
         with self._lifecycle():
-            self._recover_update(lab)
+            self._recover_update_for_cleanup(lab)
+            self._recover_runtime_transients_for_cleanup(lab)
             return self._stop(lab)
 
     def _stop(self, lab: ReviewedLab) -> RuntimeStatus:
@@ -1385,15 +1780,33 @@ class Runtime:
                 continue
             self.docker.validate_owned(record, ownership)
             validated.append(record)
-        for record in reversed(validated):
-            if not self.docker.exists(record.kind, record.object_id):
-                continue
-            self.docker.validate_owned(record, ownership)
-            self.docker.remove(record)
+        owned_container_ids = {
+            record.object_id for record in validated if record.kind == "container"
+        }
+        for network in (record for record in validated if record.kind == "network"):
+            foreign = self.docker.configured_network_consumers(network).difference(
+                owned_container_ids
+            )
+            if foreign:
+                raise PolicyError(
+                    "managed network is configured on an unowned container; refusing cleanup"
+                )
+        # Removal order is semantic and does not trust state-file ordering.
+        for kind in ("container", "volume", "network"):
+            for record in reversed(tuple(item for item in validated if item.kind == kind)):
+                if not self.docker.exists(record.kind, record.object_id):
+                    continue
+                self.docker.validate_owned(record, ownership)
+                if record.kind == "network" and self.docker.configured_network_consumers(record):
+                    raise PolicyError(
+                        "managed network still has configured container consumers; refusing cleanup"
+                    )
+                self.docker.remove(record)
 
     def remove(self, lab: ReviewedLab) -> RuntimeStatus:
         with self._lifecycle():
-            self._recover_update(lab)
+            self._recover_update_for_cleanup(lab)
+            self._recover_runtime_transients_for_cleanup(lab)
             return self._remove(lab)
 
     def _remove(self, lab: ReviewedLab) -> RuntimeStatus:
@@ -1438,7 +1851,8 @@ class Runtime:
 
     def purge(self, lab: ReviewedLab, *, images: bool = False) -> RuntimeStatus:
         with self._lifecycle():
-            self._recover_update(lab)
+            self._recover_update_for_cleanup(lab)
+            self._recover_runtime_transients_for_cleanup(lab)
             result = self._remove(lab)
             if images:
                 for image in lab.manifest.images:
@@ -1447,7 +1861,7 @@ class Runtime:
 
     def logs(self, lab: ReviewedLab, *, follow: bool) -> str:
         with self._lifecycle():
-            self._recover_update(lab)
+            self._refuse_pending_update_for_observation(lab)
             return self._logs(lab, follow=follow)
 
     def _logs(self, lab: ReviewedLab, *, follow: bool) -> str:
@@ -1478,8 +1892,8 @@ class Runtime:
     def verify(self, lab: ReviewedLab) -> RuntimeStatus:
         with self._lifecycle():
             self._require_runnable(lab)
+            self._refuse_pending_update_for_observation(lab)
             self._preflight_lab(lab)
-            self._recover_update(lab)
             status = self._status(lab)
             if status.state != "running":
                 raise PolicyError(f"{lab.manifest.id} is not running")
