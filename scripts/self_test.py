@@ -292,10 +292,16 @@ def _remote_bootstrap_gates() -> list[dict[str, object]]:
             "reason": "GitHub repository settings cannot be proven by a local gate",
         },
         {
-            "gate": "GitHub artifact attestation and published artifact verification",
+            "gate": "GitHub release publication and artifact attestation",
             "result": "skip",
-            "required_before_release": True,
-            "reason": "requires an explicitly approved stable release",
+            "required_before_release": False,
+            "reason": "runs only during an explicitly approved stable release",
+        },
+        {
+            "gate": "manual published artifact and attestation verification",
+            "result": "skip",
+            "required_before_release": False,
+            "reason": "post-release verification requires genuinely published artifacts",
         },
         {
             "gate": "GHCR keyless signing",

@@ -92,3 +92,16 @@ def test_initialization_failure_checkpoint_cannot_retain_stale_passes() -> None:
             "not run because self-test initialization failed: RuntimeError: catalogue unavailable"
         ]
     }
+
+
+def test_remote_bootstrap_gates_do_not_make_publication_circular() -> None:
+    gates = self_test._remote_bootstrap_gates()
+    required = {gate["gate"] for gate in gates if gate["required_before_release"]}
+    post_release = {gate["gate"] for gate in gates if not gate["required_before_release"]}
+
+    assert required == {
+        "hosted CI and security workflows",
+        "repository ruleset and private vulnerability reporting",
+    }
+    assert "GitHub release publication and artifact attestation" in post_release
+    assert "manual published artifact and attestation verification" in post_release

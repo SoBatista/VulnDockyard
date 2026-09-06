@@ -85,9 +85,13 @@ contexts; do not invent them from YAML job names. Create labels `release:major`,
 controller-only release. A future public GHCR build uses the protected `release`
 environment only after its manifest records redistribution authority.
 
-Remote-only bootstrap gates are the first hosted CI/CodeQL/dependency-review run,
-repository ruleset behavior, private reporting/settings, GitHub artifact
-attestations, GHCR keyless signing, and post-publication download verification.
+Remote pre-release bootstrap gates are the first hosted CI, CodeQL, and pull-request
+dependency-review runs plus repository ruleset behavior and private-reporting settings.
+GitHub artifact creation and attestation necessarily occur during an explicitly approved
+release; genuine published-artifact download and attestation verification are separate
+post-release gates. Neither is represented as a prerequisite that must pass before the
+artifact exists. GHCR signing remains inapplicable until a redistribution-authorized
+project-built image is approved.
 
 ## Standalone packaged installation
 
