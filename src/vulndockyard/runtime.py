@@ -1922,25 +1922,39 @@ class Runtime:
     def _cleanup(self, state: RunState, *, coexisting: tuple[RunState, ...] = ()) -> None:
         self._assert_no_orphans(state.lab_id, state, coexisting=coexisting)
         ownership = Ownership.from_state(state)
+        deadline = time.monotonic() + self.docker.timeouts.cleanup
+
+        def remaining(limit: float) -> float:
+            value = deadline - time.monotonic()
+            if value <= 0:
+                raise PreflightError("managed cleanup exceeded the configured cleanup timeout")
+            return min(limit, value)
+
         validated: list[ResourceRecord] = []
         for record in state.resources:
-            if not self.docker.exists(record.kind, record.object_id):
+            if not self.docker.exists(
+                record.kind,
+                record.object_id,
+                timeout=remaining(self.docker.timeouts.inspect),
+            ):
                 continue
-            self.docker.validate_owned(record, ownership)
+            self.docker.validate_owned(
+                record, ownership, timeout=remaining(self.docker.timeouts.inspect)
+            )
             validated.append(record)
         owned_container_ids = {
             record.object_id for record in validated if record.kind == "container"
         }
         for network in (record for record in validated if record.kind == "network"):
-            foreign = self.docker.configured_network_consumers(network).difference(
-                owned_container_ids
-            )
+            foreign = self.docker.configured_network_consumers(
+                network, deadline=deadline
+            ).difference(owned_container_ids)
             if foreign:
                 raise PolicyError(
                     "managed network is configured on an unowned container; refusing cleanup"
                 )
         for volume in (record for record in validated if record.kind == "volume"):
-            foreign = self.docker.configured_volume_consumers(volume).difference(
+            foreign = self.docker.configured_volume_consumers(volume, deadline=deadline).difference(
                 owned_container_ids
             )
             if foreign:
@@ -1950,18 +1964,28 @@ class Runtime:
         # Removal order is semantic and does not trust state-file ordering.
         for kind in ("container", "volume", "network"):
             for record in reversed(tuple(item for item in validated if item.kind == kind)):
-                if not self.docker.exists(record.kind, record.object_id):
+                if not self.docker.exists(
+                    record.kind,
+                    record.object_id,
+                    timeout=remaining(self.docker.timeouts.inspect),
+                ):
                     continue
-                self.docker.validate_owned(record, ownership)
-                if record.kind == "network" and self.docker.configured_network_consumers(record):
+                self.docker.validate_owned(
+                    record, ownership, timeout=remaining(self.docker.timeouts.inspect)
+                )
+                if record.kind == "network" and self.docker.configured_network_consumers(
+                    record, deadline=deadline
+                ):
                     raise PolicyError(
                         "managed network still has configured container consumers; refusing cleanup"
                     )
-                if record.kind == "volume" and self.docker.configured_volume_consumers(record):
+                if record.kind == "volume" and self.docker.configured_volume_consumers(
+                    record, deadline=deadline
+                ):
                     raise PolicyError(
                         "managed volume still has configured container consumers; refusing cleanup"
                     )
-                self.docker.remove(record)
+                self.docker.remove(record, timeout=remaining(self.docker.timeouts.cleanup))
 
     def _persistent_volume_records(
         self, state: RunState, policy: RuntimePolicySnapshot

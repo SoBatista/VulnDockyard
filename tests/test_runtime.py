@@ -429,7 +429,10 @@ class FakeDocker:
     ) -> None:
         Docker.validate_network_endpoints(inspection, expected_container_ids=expected_container_ids)
 
-    def configured_network_consumers(self, network: ResourceRecord) -> set[str]:
+    def configured_network_consumers(
+        self, network: ResourceRecord, *, deadline: float | None = None
+    ) -> set[str]:
+        del deadline
         consumers: set[str] = set()
         for object_id, inspection in self.objects.items():
             if "Config" not in inspection:
@@ -446,7 +449,10 @@ class FakeDocker:
                     consumers.add(object_id)
         return consumers
 
-    def configured_volume_consumers(self, volume: ResourceRecord) -> set[str]:
+    def configured_volume_consumers(
+        self, volume: ResourceRecord, *, deadline: float | None = None
+    ) -> set[str]:
+        del deadline
         consumers: set[str] = set()
         for object_id, inspection in self.objects.items():
             if "Config" not in inspection:
@@ -473,15 +479,24 @@ class FakeDocker:
                 consumers.add(object_id)
         return consumers
 
-    def inspect(self, kind: str, object_id: str) -> dict[str, Any]:
+    def inspect(self, kind: str, object_id: str, *, timeout: float | None = None) -> dict[str, Any]:
+        del timeout
         return self.objects[object_id]
 
-    def exists(self, kind: str, object_id: str) -> bool:
+    def exists(self, kind: str, object_id: str, *, timeout: float | None = None) -> bool:
+        del timeout
         if object_id in self.fail_exists_for:
             raise PreflightError("injected Docker existence inventory failure")
         return object_id in self.objects
 
-    def validate_owned(self, record: ResourceRecord, ownership: Ownership) -> dict[str, Any]:
+    def validate_owned(
+        self,
+        record: ResourceRecord,
+        ownership: Ownership,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        del timeout
         inspection = self.objects[record.object_id]
         labels = self._labels(record.kind, inspection)
         expected = self._label_map(ownership, expected_resource_role(record, ownership))
@@ -536,7 +551,8 @@ class FakeDocker:
                 endpoints.pop(record.object_id, None)
         self.events.append(("stop", record.name))
 
-    def remove(self, record: ResourceRecord) -> None:
+    def remove(self, record: ResourceRecord, *, timeout: float | None = None) -> None:
+        del timeout
         self.removed.append(record.object_id)
         inspection = self.objects[record.object_id]
         self.events.append(("remove", record.name))

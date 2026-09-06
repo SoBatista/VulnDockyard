@@ -1731,6 +1731,33 @@ def test_configured_volume_consumers_include_stopped_and_unresolved_attachments(
 
 
 @pytest.mark.parametrize(
+    ("method", "record"),
+    (
+        ("configured_network_consumers", ResourceRecord("network", "vdy-net", "e" * 64)),
+        (
+            "configured_volume_consumers",
+            ResourceRecord("volume", "vdy-volume", "vdy-volume"),
+        ),
+    ),
+)
+def test_consumer_inventory_uses_one_cleanup_deadline(
+    method: str,
+    record: ResourceRecord,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = RecordingRunner()
+    runner.responses = [Result(("docker",), 0, "a" * 64 + "\n", "")]
+    docker = Docker(runner, connection=fake_connection())
+    ticks = iter((0.0, 2.0))
+    monkeypatch.setattr("vulndockyard.docker.time.monotonic", lambda: next(ticks))
+
+    with pytest.raises(PreflightError, match=r"consumer inventory.*cleanup timeout"):
+        getattr(docker, method)(record, deadline=1.0)
+
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.parametrize(
     ("value", "parsed", "supported"),
     (
         ("27.5.1", ((27, 5, 1), ""), False),

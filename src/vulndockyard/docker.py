@@ -8,6 +8,7 @@ import platform
 import re
 import shutil
 import stat
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -312,10 +313,13 @@ class Docker:
             "platform": local_platform,
         }
 
-    def inspect(self, kind: str, object_id: str) -> dict[str, Any]:
+    def inspect(self, kind: str, object_id: str, *, timeout: float | None = None) -> dict[str, Any]:
         if kind not in {"container", "network", "volume", "image"}:
             raise ValueError(f"unsupported Docker object kind: {kind}")
-        result = self._run((kind, "inspect", object_id), timeout=self.timeouts.inspect)
+        result = self._run(
+            (kind, "inspect", object_id),
+            timeout=self.timeouts.inspect if timeout is None else timeout,
+        )
         try:
             values = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
@@ -324,7 +328,7 @@ class Docker:
             raise IntegrityError(f"Docker returned unexpected {kind} inspection data")
         return cast(dict[str, Any], values[0])
 
-    def exists(self, kind: str, object_id: str) -> bool:
+    def exists(self, kind: str, object_id: str, *, timeout: float | None = None) -> bool:
         if kind not in {"container", "network", "volume"}:
             raise ValueError(f"unsupported Docker object kind: {kind}")
         pattern = RESOURCE_NAME if kind == "volume" else OBJECT_ID
@@ -337,7 +341,9 @@ class Docker:
         if kind != "volume":
             query.append("--no-trunc")
         query.extend(("--quiet", "--filter", f"{'name' if kind == 'volume' else 'id'}={object_id}"))
-        response = self._run(tuple(query), timeout=self.timeouts.inspect)
+        response = self._run(
+            tuple(query), timeout=self.timeouts.inspect if timeout is None else timeout
+        )
         identifiers = tuple(line for line in response.stdout.splitlines() if line)
         if len(identifiers) != len(set(identifiers)) or any(
             pattern.fullmatch(identifier) is None for identifier in identifiers
@@ -357,7 +363,13 @@ class Docker:
             raise IntegrityError(f"Docker {kind} labels are malformed")
         return cast(dict[str, str], raw)
 
-    def validate_owned(self, record: ResourceRecord, ownership: Ownership) -> dict[str, Any]:
+    def validate_owned(
+        self,
+        record: ResourceRecord,
+        ownership: Ownership,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         if record.kind not in {"container", "network", "volume"}:
             raise IntegrityError(f"unknown recorded resource kind: {record.kind}")
         expected_role = expected_resource_role(record, ownership)
@@ -365,7 +377,7 @@ class Docker:
             raise IntegrityError("recorded Docker object ID is malformed")
         if record.kind == "volume" and record.object_id != record.name:
             raise IntegrityError("recorded Docker volume identity is malformed")
-        inspection = self.inspect(record.kind, record.object_id)
+        inspection = self.inspect(record.kind, record.object_id, timeout=timeout)
         actual_id = inspection.get("Id", inspection.get("ID", inspection.get("Name")))
         if not isinstance(actual_id, str) or actual_id != record.object_id:
             raise IntegrityError(f"recorded {record.kind} identity no longer matches")
@@ -1347,7 +1359,17 @@ class Docker:
         if actual != expected_container_ids:
             raise PolicyError("Docker network endpoints differ from the exact managed topology")
 
-    def configured_network_consumers(self, network: ResourceRecord) -> set[str]:
+    def _consumer_scan_timeout(self, deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise PreflightError(
+                "Docker container consumer inventory exceeded the configured cleanup timeout"
+            )
+        return min(self.timeouts.inspect, remaining)
+
+    def configured_network_consumers(
+        self, network: ResourceRecord, *, deadline: float | None = None
+    ) -> set[str]:
         """Return all containers, including stopped ones, configured for a network."""
         if (
             network.kind != "network"
@@ -1355,9 +1377,10 @@ class Docker:
             or not OBJECT_ID.fullmatch(network.object_id)
         ):
             raise IntegrityError("recorded Docker network identity is malformed")
+        expires = time.monotonic() + self.timeouts.cleanup if deadline is None else deadline
         response = self._run(
             ("container", "ls", "--all", "--no-trunc", "--quiet"),
-            timeout=self.timeouts.inspect,
+            timeout=self._consumer_scan_timeout(expires),
         )
         container_ids = tuple(line for line in response.stdout.splitlines() if line)
         if len(set(container_ids)) != len(container_ids) or any(
@@ -1366,7 +1389,9 @@ class Docker:
             raise IntegrityError("Docker returned malformed container inventory")
         consumers: set[str] = set()
         for object_id in container_ids:
-            inspection = self.inspect("container", object_id)
+            inspection = self.inspect(
+                "container", object_id, timeout=self._consumer_scan_timeout(expires)
+            )
             if inspection.get("Id") != object_id:
                 raise IntegrityError(
                     "Docker container inventory identity changed during inspection"
@@ -1387,7 +1412,9 @@ class Docker:
                     consumers.add(object_id)
         return consumers
 
-    def configured_volume_consumers(self, volume: ResourceRecord) -> set[str]:
+    def configured_volume_consumers(
+        self, volume: ResourceRecord, *, deadline: float | None = None
+    ) -> set[str]:
         """Return all containers configured to consume an exact named volume."""
         if (
             volume.kind != "volume"
@@ -1395,9 +1422,10 @@ class Docker:
             or volume.object_id != volume.name
         ):
             raise IntegrityError("recorded Docker volume identity is malformed")
+        expires = time.monotonic() + self.timeouts.cleanup if deadline is None else deadline
         response = self._run(
             ("container", "ls", "--all", "--no-trunc", "--quiet"),
-            timeout=self.timeouts.inspect,
+            timeout=self._consumer_scan_timeout(expires),
         )
         container_ids = tuple(line for line in response.stdout.splitlines() if line)
         if len(set(container_ids)) != len(container_ids) or any(
@@ -1406,7 +1434,9 @@ class Docker:
             raise IntegrityError("Docker returned malformed container inventory")
         consumers: set[str] = set()
         for object_id in container_ids:
-            inspection = self.inspect("container", object_id)
+            inspection = self.inspect(
+                "container", object_id, timeout=self._consumer_scan_timeout(expires)
+            )
             if inspection.get("Id") != object_id:
                 raise IntegrityError(
                     "Docker container inventory identity changed during inspection"
@@ -1466,7 +1496,7 @@ class Docker:
             timeout=self.timeouts.stop + 5,
         )
 
-    def remove(self, record: ResourceRecord) -> None:
+    def remove(self, record: ResourceRecord, *, timeout: float | None = None) -> None:
         if record.kind == "container":
             args: tuple[str, ...] = ("container", "rm", "--force", record.object_id)
         elif record.kind == "network":
@@ -1475,7 +1505,7 @@ class Docker:
             args = ("volume", "rm", record.object_id)
         else:
             raise IntegrityError(f"unsupported cleanup kind: {record.kind}")
-        self._run(args, timeout=self.timeouts.cleanup)
+        self._run(args, timeout=self.timeouts.cleanup if timeout is None else timeout)
 
     def logs(self, record: ResourceRecord, *, follow: bool, tail: int = 100) -> Result:
         if record.kind != "container":

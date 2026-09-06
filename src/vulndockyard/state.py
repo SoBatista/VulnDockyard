@@ -22,6 +22,8 @@ from .jsonio import StrictJSONError, strict_json_loads
 from .models import DIGEST, HOSTNAME, LAB_ID, OCI_NAME, UTC_TIMESTAMP, EphemeralStorage, Service
 from .paths import Paths
 
+MAX_STATE_RESOURCES = 72
+
 
 @dataclass(frozen=True)
 class ResourceRecord:
@@ -322,6 +324,10 @@ class RunState:
         raw_resources = data["resources"]
         if not isinstance(raw_resources, list):
             raise IntegrityError("run state resources must be an array")
+        if len(raw_resources) > MAX_STATE_RESOURCES:
+            raise IntegrityError(
+                f"run state exceeds the {MAX_STATE_RESOURCES}-resource safety bound"
+            )
         resources: list[ResourceRecord] = []
         for value in raw_resources:
             if not isinstance(value, dict) or value.keys() != {"kind", "name", "object_id"}:

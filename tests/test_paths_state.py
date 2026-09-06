@@ -494,6 +494,14 @@ def test_state_rejects_untrusted_terminal_and_resource_fields() -> None:
     with pytest.raises(IntegrityError, match="resource kind"):
         RunState.parse(value)
 
+    value = serialized_state()
+    value["resources"] = [
+        {"kind": "container", "name": f"resource-{index}", "object_id": f"{index:064x}"}
+        for index in range(73)
+    ]
+    with pytest.raises(IntegrityError, match="72-resource safety bound"):
+        RunState.parse(value)
+
 
 def test_lifecycle_lock_is_bounded_across_independent_stores(xdg_paths: Paths) -> None:
     first = StateStore(xdg_paths)
