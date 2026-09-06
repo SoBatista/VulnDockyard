@@ -800,6 +800,15 @@ class Runtime:
                 self.docker.start(seeder)
                 checkpoint()
                 self._wait_for_seeder(seeder, ownership)
+                if lab.manifest.persistence_required:
+                    if not self._running(self.docker.validate_owned(seeder, ownership)):
+                        raise PreflightError(
+                            "persistent storage initializer stopped before bounded removal"
+                        )
+                    self.docker.remove(seeder)
+                    resources.remove(seeder)
+                    checkpoint()
+                    seeder = None
             application = self.docker.create_application(
                 name=f"{prefix}-app",
                 image=selected_reference,

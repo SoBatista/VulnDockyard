@@ -800,6 +800,37 @@ def test_persistent_rebuild_preserves_owned_data_and_reset_replaces_it(
     assert docker.objects == {}
 
 
+def test_persistent_root_initializer_is_removed_before_application_execution(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, packaged = runtime(xdg_paths)
+    lab = persistent_review(packaged)
+
+    value.up(lab, host_port=18080)
+
+    seeder_name = next(
+        str(event[1])
+        for event in docker.events
+        if event[0] == "start" and str(event[1]).endswith("-seeder")
+    )
+    application_name = next(
+        str(event[1])
+        for event in docker.events
+        if event[0] == "start" and str(event[1]).endswith("-app")
+    )
+    assert docker.events.index(("start", seeder_name)) < docker.events.index(
+        ("remove", seeder_name)
+    )
+    assert docker.events.index(("remove", seeder_name)) < docker.events.index(
+        ("start", application_name)
+    )
+    state = value.store.load(lab.manifest.id)
+    assert state is not None and state.phase == "steady"
+    assert not any(record.name == seeder_name for record in state.resources)
+
+    assert value.remove(lab).state == "absent"
+
+
 def test_persistent_rebuild_rejects_foreign_volume_consumer_before_mutation(
     xdg_paths: Paths,
 ) -> None:
