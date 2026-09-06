@@ -9,9 +9,9 @@
   "source_sha256": "",
   "build_recipe_revision": "",
   "trust_evidence": [
-    "https://github.com/OWASP/crAPI/blob/main/.github/workflows/publish.yml"
+    "https://github.com/OWASP/crAPI/blob/v1.1.6/.github/workflows/publish.yml",
+    "https://github.com/OWASP/crAPI/blob/v1.1.6/deploy/docker/docker-compose.yml"
   ],
   "verified_at": "2026-09-06T00:00:00Z",
   "verified_platforms": []
 }
-

@@ -31,16 +31,38 @@
     "limitations": [
       "Provenance, containment, licensing, architecture, or functionality review is incomplete."
     ],
-    "status_reason": "Five official components still require a jointly reviewed digest lock and database, LDAP, and vulnerability-catalogue smoke verification."
+    "status_reason": "The official five role-tag images still require a jointly reviewed digest lock, architecture evidence, and database, LDAP, and vulnerability-catalogue smoke verification."
   },
   "images": [
     {
       "name": "docker.io/webpwnized/mutillidae",
       "digest": "",
-      "architectures": [
-        "linux/amd64"
-      ],
+      "architectures": [],
       "role": "application"
+    },
+    {
+      "name": "docker.io/webpwnized/mutillidae",
+      "digest": "",
+      "architectures": [],
+      "role": "database"
+    },
+    {
+      "name": "docker.io/webpwnized/mutillidae",
+      "digest": "",
+      "architectures": [],
+      "role": "database-admin"
+    },
+    {
+      "name": "docker.io/webpwnized/mutillidae",
+      "digest": "",
+      "architectures": [],
+      "role": "directory"
+    },
+    {
+      "name": "docker.io/webpwnized/mutillidae",
+      "digest": "",
+      "architectures": [],
+      "role": "directory-admin"
     }
   ],
   "services": [
@@ -51,6 +73,38 @@
       "protocol": "http",
       "health_path": "/",
       "identity_regex": "Mutillidae"
+    },
+    {
+      "name": "database",
+      "image_role": "database",
+      "internal_port": 3306,
+      "protocol": "tcp",
+      "health_path": "/",
+      "identity_regex": "MySQL"
+    },
+    {
+      "name": "database-admin",
+      "image_role": "database-admin",
+      "internal_port": 80,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_regex": "phpMyAdmin"
+    },
+    {
+      "name": "directory",
+      "image_role": "directory",
+      "internal_port": 389,
+      "protocol": "tcp",
+      "health_path": "/",
+      "identity_regex": "LDAP"
+    },
+    {
+      "name": "directory-admin",
+      "image_role": "directory-admin",
+      "internal_port": 80,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_regex": "phpLDAPadmin"
     }
   ],
   "friendly_hostname": "mutillidae.test",
@@ -71,11 +125,11 @@
     ]
   },
   "reset": {
-    "strategy": "Recreate all five owned services and MySQL/LDAP state",
+    "strategy": "Recreate all five owned services, discard MySQL container-local state, and remove only the two owned LDAP volumes",
     "effects": [
-      "mysql",
-      "ldap-database",
-      "ldap-config"
+      "database-container-state",
+      "ldap_data",
+      "ldap_config"
     ]
   },
   "default_credentials": [
@@ -90,9 +144,8 @@
   "persistence": {
     "required": true,
     "volumes": [
-      "mysql",
-      "ldap-database",
-      "ldap-config"
+      "ldap_data",
+      "ldap_config"
     ]
   },
   "outbound_network": {
@@ -110,7 +163,9 @@
   ],
   "known_limitations": [
     "Official configuration expects mutillidae.localhost",
-    "No verified multi-architecture stack"
+    "The official deployment uses the www, database, database_admin, ldap, and ldap_admin tags",
+    "Only LDAP data and configuration use named volumes; MySQL state is container-local",
+    "No verified architecture set"
   ],
   "last_verified": "2026-09-06",
   "adapter_status": "quarantined",
@@ -130,4 +185,3 @@
     "https://github.com/webpwnized/mutillidae-dockerhub"
   ]
 }
-

@@ -20,18 +20,19 @@
   },
   "license": {
     "spdx": "Apache-2.0",
-    "evidence_url": "https://github.com/OWASP/NodeGoat/blob/master/LICENSE",
+    "evidence_url": "https://github.com/OWASP/NodeGoat/blob/v1.4/LICENSE",
     "redistribution": "A future project build is legally possible with Apache-2.0 notices, but none is authorized until its build review passes."
   },
   "trust": {
     "level": "quarantined",
     "evidence": [
-      "https://github.com/OWASP/NodeGoat/blob/master/docker-compose.yml"
+      "https://github.com/OWASP/NodeGoat/blob/v1.4/docker-compose.yml",
+      "https://github.com/OWASP/NodeGoat/blob/v1.4/Dockerfile"
     ],
     "limitations": [
       "Provenance, containment, licensing, architecture, or functionality review is incomplete."
     ],
-    "status_reason": "No official upstream-published OCI image exists; upstream Compose builds source with mutable obsolete Node and Mongo bases."
+    "status_reason": "No official upstream-published application image exists; v1.4 builds with Node 4.4 and Node 4 Alpine while Compose uses unresolved mongo:latest."
   },
   "images": [],
   "services": [],
@@ -83,7 +84,8 @@
     "Node.js and OWASP Top 10 tutorial"
   ],
   "known_limitations": [
-    "Node 12 and MongoDB 4.4 are obsolete",
+    "The v1.4 Dockerfile uses a Node 4.4 builder and Node 4 Alpine runtime",
+    "The v1.4 Compose file uses unresolved mongo:latest",
     "No deterministic byte-for-byte seed state"
   ],
   "last_verified": "2026-09-06",
@@ -101,7 +103,7 @@
     "cve": []
   },
   "references": [
-    "https://github.com/OWASP/NodeGoat"
+    "https://github.com/OWASP/NodeGoat/blob/v1.4/docker-compose.yml",
+    "https://github.com/OWASP/NodeGoat/blob/v1.4/Dockerfile"
   ]
 }
-

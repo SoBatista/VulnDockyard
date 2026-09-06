@@ -9,9 +9,9 @@
   "source_sha256": "",
   "build_recipe_revision": "",
   "trust_evidence": [
-    "https://sourceforge.net/projects/bwapp/"
+    "https://sourceforge.net/p/bwapp/code/ci/master/tree/bWAPP/credits.php?format=raw",
+    "https://sourceforge.net/rest/p/bwapp"
   ],
   "verified_at": "2026-09-06T00:00:00Z",
   "verified_platforms": []
 }
-

@@ -9,9 +9,8 @@
   "source_sha256": "",
   "build_recipe_revision": "",
   "trust_evidence": [
-    "https://github.com/OWASP/SecurityShepherd/blob/dev/docker-compose.yml"
+    "https://github.com/OWASP/SecurityShepherd/blob/v3.1/docker-compose.yml"
   ],
   "verified_at": "2026-09-06T00:00:00Z",
   "verified_platforms": []
 }
-

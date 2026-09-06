@@ -20,18 +20,19 @@
   },
   "license": {
     "spdx": "Apache-2.0",
-    "evidence_url": "https://github.com/OWASP/crAPI/blob/main/LICENSE.md",
+    "evidence_url": "https://github.com/OWASP/crAPI/blob/v1.1.6/LICENSE.md",
     "redistribution": "Upstream images would be pulled; source is Apache-2.0, while every third-party service retains its own license."
   },
   "trust": {
     "level": "quarantined",
     "evidence": [
-      "https://github.com/OWASP/crAPI/blob/main/.github/workflows/publish.yml"
+      "https://github.com/OWASP/crAPI/blob/v1.1.6/.github/workflows/publish.yml",
+      "https://github.com/OWASP/crAPI/blob/v1.1.6/deploy/docker/docker-compose.yml"
     ],
     "limitations": [
       "Provenance, containment, licensing, architecture, or functionality review is incomplete."
     ],
-    "status_reason": "Stable source release does not map to a stable complete image set; the ten-image stack and happy path remain unverified together."
+    "status_reason": "The v1.1.6 ten-service deployment mixes version-substituted crapi images, fixed mutable tags, and latest; no complete immutable image set or happy-path verification exists."
   },
   "images": [
     {
@@ -42,6 +43,60 @@
         "linux/arm64"
       ],
       "role": "application"
+    },
+    {
+      "name": "docker.io/crapi/crapi-identity",
+      "digest": "",
+      "architectures": [],
+      "role": "identity"
+    },
+    {
+      "name": "docker.io/crapi/crapi-community",
+      "digest": "",
+      "architectures": [],
+      "role": "community"
+    },
+    {
+      "name": "docker.io/crapi/crapi-workshop",
+      "digest": "",
+      "architectures": [],
+      "role": "workshop"
+    },
+    {
+      "name": "docker.io/crapi/crapi-chatbot",
+      "digest": "",
+      "architectures": [],
+      "role": "chatbot"
+    },
+    {
+      "name": "docker.io/library/postgres",
+      "digest": "",
+      "architectures": [],
+      "role": "postgres"
+    },
+    {
+      "name": "docker.io/library/mongo",
+      "digest": "",
+      "architectures": [],
+      "role": "mongodb"
+    },
+    {
+      "name": "docker.io/chromadb/chroma",
+      "digest": "",
+      "architectures": [],
+      "role": "chromadb"
+    },
+    {
+      "name": "docker.io/crapi/mailhog",
+      "digest": "",
+      "architectures": [],
+      "role": "mailhog"
+    },
+    {
+      "name": "docker.io/crapi/gateway-service",
+      "digest": "",
+      "architectures": [],
+      "role": "dealership-gateway"
     }
   ],
   "services": [
@@ -52,6 +107,78 @@
       "protocol": "http",
       "health_path": "/health",
       "identity_regex": "healthy"
+    },
+    {
+      "name": "identity",
+      "image_role": "identity",
+      "internal_port": 8080,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_regex": "crAPI"
+    },
+    {
+      "name": "community",
+      "image_role": "community",
+      "internal_port": 8087,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_regex": "crAPI"
+    },
+    {
+      "name": "workshop",
+      "image_role": "workshop",
+      "internal_port": 8000,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_regex": "crAPI"
+    },
+    {
+      "name": "chatbot",
+      "image_role": "chatbot",
+      "internal_port": 5002,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_regex": "crAPI"
+    },
+    {
+      "name": "postgres",
+      "image_role": "postgres",
+      "internal_port": 5432,
+      "protocol": "tcp",
+      "health_path": "/",
+      "identity_regex": "PostgreSQL"
+    },
+    {
+      "name": "mongodb",
+      "image_role": "mongodb",
+      "internal_port": 27017,
+      "protocol": "tcp",
+      "health_path": "/",
+      "identity_regex": "MongoDB"
+    },
+    {
+      "name": "chromadb",
+      "image_role": "chromadb",
+      "internal_port": 8000,
+      "protocol": "http",
+      "health_path": "/api/v1/heartbeat",
+      "identity_regex": "heartbeat|nanosecond"
+    },
+    {
+      "name": "mailhog",
+      "image_role": "mailhog",
+      "internal_port": 8025,
+      "protocol": "http",
+      "health_path": "/",
+      "identity_regex": "MailHog"
+    },
+    {
+      "name": "dealership-gateway",
+      "image_role": "dealership-gateway",
+      "internal_port": 443,
+      "protocol": "https",
+      "health_path": "/",
+      "identity_regex": "premiumdealership|gateway"
     }
   ],
   "friendly_hostname": "crapi.test",
@@ -71,12 +198,12 @@
     ]
   },
   "reset": {
-    "strategy": "Remove only owned PostgreSQL, MongoDB, Chroma, and signing-key state",
+    "strategy": "Remove only owned PostgreSQL, MongoDB, Chroma, and generated signing-key state",
     "effects": [
-      "postgres",
-      "mongo",
-      "chroma",
-      "signing-key"
+      "postgresql-data",
+      "mongodb-data",
+      "chromadb-data",
+      "generated-signing-keys"
     ]
   },
   "default_credentials": [],
@@ -89,10 +216,10 @@
   "persistence": {
     "required": true,
     "volumes": [
-      "postgres",
-      "mongo",
-      "chroma",
-      "signing-key"
+      "postgresql-data",
+      "mongodb-data",
+      "chromadb-data",
+      "generated-signing-keys"
     ]
   },
   "outbound_network": {
@@ -110,8 +237,9 @@
     "Community content and API security challenges"
   ],
   "known_limitations": [
-    "Upstream deployment follows mutable main/latest tags",
-    "Chatbot and Chroma lack upstream resource limits"
+    "v1.1.6 defaults crapi roles to latest, PostgreSQL to 14, MongoDB to 4.4, and Chroma to latest",
+    "The Chroma and generated signing-key state need containment review",
+    "Chatbot functionality requires an explicitly configured LLM provider"
   ],
   "last_verified": "2026-09-06",
   "adapter_status": "quarantined",
@@ -129,7 +257,7 @@
   },
   "references": [
     "https://owasp.org/crAPI/docs/overview.html",
-    "https://github.com/OWASP/crAPI/blob/develop/docs/happy-path.md"
+    "https://github.com/OWASP/crAPI/blob/v1.1.6/deploy/docker/docker-compose.yml",
+    "https://github.com/OWASP/crAPI/blob/v1.1.6/docs/happy-path.md"
   ]
 }
-

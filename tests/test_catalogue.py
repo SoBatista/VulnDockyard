@@ -62,6 +62,50 @@ def test_quarantined_lab_refuses_image_reference() -> None:
     assert "redistribution" in lab.manifest.status_reason
 
 
+def test_quarantined_adapter_evidence_matches_pinned_upstream_topologies() -> None:
+    catalogue = Catalogue()
+
+    bwapp = catalogue.get("bwapp").manifest.raw
+    assert bwapp["license"]["spdx"] == "NOASSERTION"
+    assert "reserve all rights" in bwapp["license"]["redistribution"]
+
+    shepherd = catalogue.get("security-shepherd").manifest.raw
+    assert shepherd["version"]["tag"] == "v3.1"
+    assert shepherd["persistence"]["volumes"] == []
+    assert shepherd["reset"]["effects"] == ["web-container-state", "mysql-container-state"]
+    assert "Mongo" not in shepherd["trust"]["status_reason"]
+
+    nodegoat = catalogue.get("nodegoat").manifest.raw
+    assert "Node 4.4" in nodegoat["trust"]["status_reason"]
+    assert "mongo:latest" in nodegoat["trust"]["status_reason"]
+
+    wrongsecrets = catalogue.get("wrongsecrets").manifest.raw
+    assert wrongsecrets["license"]["spdx"] == "AGPL-3.0-or-later"
+    assert {
+        (service["name"], service["internal_port"]) for service in wrongsecrets["services"]
+    } == {
+        ("web", 8080),
+        ("mcp", 8090),
+    }
+
+    mutillidae = catalogue.get("mutillidae").manifest.raw
+    assert {image["role"] for image in mutillidae["images"]} == {
+        "application",
+        "database",
+        "database-admin",
+        "directory",
+        "directory-admin",
+    }
+    assert mutillidae["persistence"]["volumes"] == ["ldap_data", "ldap_config"]
+
+    crapi = catalogue.get("crapi").manifest.raw
+    assert len(crapi["images"]) == 10
+    assert len(crapi["services"]) == 10
+    assert {"postgresql-data", "mongodb-data", "chromadb-data"} < set(
+        crapi["persistence"]["volumes"]
+    )
+
+
 def test_lookup_search_and_ambiguity() -> None:
     catalogue = Catalogue()
     assert catalogue.get("Juice Shop").manifest.id == "juice-shop"

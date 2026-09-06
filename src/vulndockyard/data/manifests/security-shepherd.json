@@ -21,18 +21,18 @@
   },
   "license": {
     "spdx": "GPL-3.0-or-later",
-    "evidence_url": "https://github.com/OWASP/SecurityShepherd/blob/dev/LICENSE",
+    "evidence_url": "https://github.com/OWASP/www-project-security-shepherd/blob/master/migrated_content.md",
     "redistribution": "A future project build must satisfy GPL source and corresponding-source obligations; none is authorized yet."
   },
   "trust": {
     "level": "quarantined",
     "evidence": [
-      "https://github.com/OWASP/SecurityShepherd/blob/dev/docker-compose.yml"
+      "https://github.com/OWASP/SecurityShepherd/blob/v3.1/docker-compose.yml"
     ],
     "limitations": [
       "Provenance, containment, licensing, architecture, or functionality review is incomplete."
     ],
-    "status_reason": "No official remote OCI artifact exists; upstream deployment builds generated WAR, database, and Mongo images from mutable bases."
+    "status_reason": "No official remote OCI artifact exists; the pinned v3.1 Compose deployment builds the web and MySQL services from local source contexts and mutable bases."
   },
   "images": [],
   "services": [],
@@ -53,12 +53,10 @@
     ]
   },
   "reset": {
-    "strategy": "Remove only owned MariaDB, MongoDB, Tomcat configuration, and log volumes",
+    "strategy": "Recreate only the owned v3.1 web and MySQL containers; v3.1 declares no named volumes",
     "effects": [
-      "mariadb",
-      "mongodb",
-      "tomcat-config",
-      "logs"
+      "web-container-state",
+      "mysql-container-state"
     ]
   },
   "default_credentials": [
@@ -72,12 +70,7 @@
   },
   "persistence": {
     "required": true,
-    "volumes": [
-      "mariadb",
-      "mongodb",
-      "tomcat-config",
-      "logs"
-    ]
+    "volumes": []
   },
   "outbound_network": {
     "required": false,
@@ -93,7 +86,7 @@
   ],
   "known_limitations": [
     "Self-signed TLS",
-    "Generated build artifacts are required",
+    "Pinned v3.1 builds both web and MySQL from local source contexts and declares no named volumes",
     "Mobile training is outside a web-container-only deployment"
   ],
   "last_verified": "2026-09-06",
@@ -111,7 +104,7 @@
     "cve": []
   },
   "references": [
-    "https://github.com/OWASP/SecurityShepherd"
+    "https://github.com/OWASP/SecurityShepherd/blob/v3.1/docker-compose.yml",
+    "https://github.com/OWASP/SecurityShepherd/releases/tag/v3.1"
   ]
 }
-

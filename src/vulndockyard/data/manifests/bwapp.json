@@ -18,19 +18,20 @@
     "commit": ""
   },
   "license": {
-    "spdx": "CC-BY-NC-ND-4.0",
-    "evidence_url": "https://sourceforge.net/p/bwapp/code/ci/master/tree/bWAPP/credits.php",
-    "redistribution": "Containerization and modified redistribution are not authorized by the documented NoDerivatives and NonCommercial terms."
+    "spdx": "NOASSERTION",
+    "evidence_url": "https://sourceforge.net/p/bwapp/code/ci/master/tree/bWAPP/credits.php?format=raw",
+    "redistribution": "The official credits reserve all rights and the SourceForge project metadata names no license; no explicit source modification or redistribution grant was found."
   },
   "trust": {
     "level": "quarantined",
     "evidence": [
-      "https://sourceforge.net/projects/bwapp/"
+      "https://sourceforge.net/p/bwapp/code/ci/master/tree/bWAPP/credits.php?format=raw",
+      "https://sourceforge.net/rest/p/bwapp"
     ],
     "limitations": [
       "Provenance, containment, licensing, architecture, or functionality review is incomplete."
     ],
-    "status_reason": "No maintainer-published OCI image exists and redistribution/containerization permission is unresolved; prohibited third-party images will not be used."
+    "status_reason": "No maintainer-published OCI image exists and no explicit redistribution grant was found; prohibited third-party images will not be used."
   },
   "images": [],
   "services": [],
@@ -84,7 +85,7 @@
   ],
   "known_limitations": [
     "No trusted image",
-    "Redistribution permission unresolved",
+    "Official credits reserve all rights and redistribution permission is unresolved",
     "Obsolete runtime compatibility likely"
   ],
   "last_verified": "2026-09-06",
@@ -102,6 +103,7 @@
     "cve": []
   },
   "references": [
-    "https://sourceforge.net/p/bwapp/code/ci/master/tree/INSTALL.txt"
+    "https://sourceforge.net/p/bwapp/code/ci/master/tree/INSTALL.txt",
+    "https://sourceforge.net/rest/p/bwapp"
   ]
 }

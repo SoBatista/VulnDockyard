@@ -9,9 +9,9 @@
   "source_sha256": "",
   "build_recipe_revision": "",
   "trust_evidence": [
-    "https://github.com/OWASP/NodeGoat/blob/master/docker-compose.yml"
+    "https://github.com/OWASP/NodeGoat/blob/v1.4/docker-compose.yml",
+    "https://github.com/OWASP/NodeGoat/blob/v1.4/Dockerfile"
   ],
   "verified_at": "2026-09-06T00:00:00Z",
   "verified_platforms": []
 }
-
