@@ -10,9 +10,8 @@ import pytest
 from scripts import release as release_module
 from scripts import secret_scan
 from scripts.check_repository import _dependency_lock_failures
+from scripts.check_version import _projection_state, check_release_ready
 from scripts.check_version import check as check_version
-from scripts.check_version import check_release_ready
-from scripts.check_version import _projection_state
 from scripts.check_workflows import check as check_workflows
 from scripts.generate_sbom import generate
 from scripts.release import _expected_artifacts, _release_metadata, _verify_sums
