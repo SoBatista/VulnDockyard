@@ -138,6 +138,27 @@ def test_help_and_every_topic_are_available(capsys: pytest.CaptureFixture[str]) 
     assert "A provenance-aware" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    (["help"], ["help", "up"], ["version"], ["completion", "bash"]),
+)
+def test_metadata_commands_do_not_construct_catalogue_or_runtime(
+    arguments: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def unexpected(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("metadata command constructed runtime state")
+
+    monkeypatch.setattr(cli, "Catalogue", unexpected)
+    monkeypatch.setattr(cli, "Runtime", unexpected)
+    monkeypatch.setenv("VDY_TIMEOUT_INSPECT", "invalid")
+
+    assert cli.main(arguments) == 0
+    assert capsys.readouterr().out
+
+
 def test_json_contract_is_stable_and_deterministic(
     isolated_cli: type[FakeRuntime], capsys: pytest.CaptureFixture[str]
 ) -> None:

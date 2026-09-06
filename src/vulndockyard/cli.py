@@ -423,8 +423,6 @@ def _completion(shell: str) -> str:
 
 def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: Output) -> None:
     command = str(args.command)
-    catalogue = Catalogue()
-    runtime = Runtime(catalogue=catalogue)
     if command == "help":
         if args.topic:
             choices = getattr(parser, "_vdy_choices", {})
@@ -434,9 +432,22 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
         else:
             help_text = parser.format_help()
         output.emit(command, {"topic": args.topic, "text": help_text}, help_text.rstrip())
-    elif command == "version":
+        return
+    if command == "version":
         output.emit(command, {"version": __version__}, f"vulndockyard {__version__}")
-    elif command == "doctor":
+        return
+    if command == "completion":
+        completion_source = _completion(args.shell)
+        output.emit(
+            command,
+            {"shell": args.shell, "source": completion_source},
+            completion_source,
+        )
+        return
+
+    catalogue = Catalogue()
+    runtime = Runtime(catalogue=catalogue)
+    if command == "doctor":
         hosts_manager = HostsManager()
         result = _doctor(runtime.paths, hosts_manager)
         stale_check = next(check for check in result["checks"] if check["name"] == "managed-hosts")
@@ -664,13 +675,6 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
             command,
             provider_value,
             "\n".join(f"{key}: {item}" for key, item in provider_value.items()),
-        )
-    elif command == "completion":
-        completion_source = _completion(args.shell)
-        output.emit(
-            command,
-            {"shell": args.shell, "source": completion_source},
-            completion_source,
         )
     else:
         raise argparse.ArgumentError(None, f"unsupported command: {command}")
