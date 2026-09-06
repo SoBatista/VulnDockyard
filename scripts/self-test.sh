@@ -7,5 +7,14 @@ if ! [[ "${overall_timeout}" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
+python_command="${VDY_PYTHON:-}"
+if [[ -z "${python_command}" ]]; then
+  if [[ -x .venv/bin/python ]]; then
+    python_command='.venv/bin/python'
+  else
+    python_command='python3'
+  fi
+fi
+
 exec timeout --signal=TERM --kill-after=30s "${overall_timeout}s" \
-  python scripts/self_test.py "$@"
+  "${python_command}" scripts/self_test.py "$@"
