@@ -33,6 +33,11 @@ release ready until every locally applicable required phase passes. The checkpoi
 keeps remote-only release gates as explicit unverified skips until their documented
 bootstrap point.
 
+The test gate enforces 85% branch-aware controller coverage. The only configured
+line exclusions are type-checking-only branches and direct `__main__` launch
+guards, because neither contains application behavior; production error paths and
+security-policy decisions are not excluded.
+
 ## Changes and release impact
 
 Use focused Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `ci:`,
