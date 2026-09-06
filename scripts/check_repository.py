@@ -112,11 +112,12 @@ def _requirement_records(path: Path) -> tuple[str, ...]:
     return tuple(records)
 
 
-def _dependency_lock_failures() -> list[str]:
+def _parse_dependency_lock(
+    path: Path, *, expected_markers: dict[str, str]
+) -> tuple[dict[str, tuple[str, set[str]]], list[str]]:
     failures: list[str] = []
-    path = ROOT / "requirements-dev.lock"
     if not path.is_file() or path.is_symlink():
-        return ["requirements-dev.lock must be a regular file"]
+        return {}, [f"{path.name} must be a regular file"]
     requirements: dict[str, tuple[str, set[str]]] = {}
     for record in _requirement_records(path):
         requirement_hashes = set(LOCK_HASH.findall(record))
@@ -128,13 +129,20 @@ def _dependency_lock_failures() -> list[str]:
             failures.append(f"unhashed or non-exact dependency lock entry: {record}")
             continue
         name = re.sub(r"[-_.]+", "-", match.group("name")).casefold()
-        expected_marker = EXPECTED_MARKERS.get(name, "")
+        expected_marker = expected_markers.get(name, "")
         if marker.strip() != expected_marker or bool(separator) != bool(expected_marker):
-            failures.append(f"requirements-dev.lock has an unexpected marker for {name}")
+            failures.append(f"{path.name} has an unexpected marker for {name}")
         if name in requirements:
-            failures.append(f"duplicate dependency lock entry: {name}")
+            failures.append(f"duplicate {path.name} dependency entry: {name}")
             continue
         requirements[name] = (match.group("version"), requirement_hashes)
+    return requirements, failures
+
+
+def _dependency_lock_failures() -> list[str]:
+    requirements, failures = _parse_dependency_lock(
+        ROOT / "requirements-dev.lock", expected_markers=EXPECTED_MARKERS
+    )
 
     uv_data = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
     expected: dict[str, tuple[str, set[str]]] = {}
@@ -166,9 +174,10 @@ def _dependency_lock_failures() -> list[str]:
             failures.append(f"requirements-dev.lock differs from uv.lock for {name}")
 
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    runtime_values = project.get("project", {}).get("dependencies", [])
     direct_values = [
         *project.get("build-system", {}).get("requires", []),
-        *project.get("project", {}).get("dependencies", []),
+        *runtime_values,
         *project.get("project", {}).get("optional-dependencies", {}).get("dev", []),
     ]
     for value in direct_values:
@@ -180,6 +189,29 @@ def _dependency_lock_failures() -> list[str]:
         locked = requirements.get(name)
         if locked is None or locked[0] != match.group("version"):
             failures.append(f"project dependency differs from requirements-dev.lock: {value}")
+
+    runtime_requirements, runtime_failures = _parse_dependency_lock(
+        ROOT / "requirements-runtime.lock", expected_markers={}
+    )
+    failures.extend(runtime_failures)
+    expected_runtime: dict[str, tuple[str, set[str]]] = {}
+    for value in runtime_values:
+        match = DIRECT_REQUIREMENT.fullmatch(str(value))
+        if match is None:
+            continue
+        name = re.sub(r"[-_.]+", "-", match.group("name")).casefold()
+        locked = expected.get(name)
+        if locked is not None and locked[0] == match.group("version"):
+            expected_runtime[name] = locked
+    if set(runtime_requirements) != set(expected_runtime):
+        missing = sorted(set(expected_runtime) - set(runtime_requirements))
+        extra = sorted(set(runtime_requirements) - set(expected_runtime))
+        failures.append(
+            f"requirements-runtime.lock package mismatch: missing={missing}, extra={extra}"
+        )
+    for name in sorted(set(runtime_requirements) & set(expected_runtime)):
+        if runtime_requirements[name] != expected_runtime[name]:
+            failures.append(f"requirements-runtime.lock differs from uv.lock for {name}")
     return failures
 
 
@@ -192,6 +224,8 @@ def check() -> None:
     relative_files = {str(path.relative_to(ROOT)) for path in files}
     if "requirements-dev.lock" not in relative_files:
         failures.append("requirements-dev.lock is not tracked")
+    if "requirements-runtime.lock" not in relative_files:
+        failures.append("requirements-runtime.lock is not tracked")
     for path in files:
         relative = path.relative_to(ROOT)
         if any(part.casefold() in BANNED_TOP_LEVEL for part in relative.parts[:-1]):

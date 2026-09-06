@@ -1581,6 +1581,9 @@ def test_remaining_bounded_docker_operations_construct_exact_argv(
     docker.stop(container)
     runner.responses = [Result(("docker",), 0, "line\n", "warning\n")]
     assert docker.logs(container, follow=True).stdout == "line\n"
+    runner.responses = [Result(("docker",), 1, "", "daemon unavailable\n")]
+    with pytest.raises(CommandError, match="daemon unavailable"):
+        docker.logs(container, follow=False)
     docker.remove_image("registry.example.test/app@sha256:" + "f" * 64)
     runner.responses = [
         Result(("docker",), 0, "1" * 64 + "\n", ""),

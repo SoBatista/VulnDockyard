@@ -20,14 +20,16 @@ remote-only gates remain explicitly recorded as unverified skips until their
 documented bootstrap point. The suite compares two builds, installs from a
 tracked-files-only release shape into a clean venv,
 generates an SPDX package SBOM with explicit `DEPENDS_ON` relationships for exact
-runtime requirements, scans both the tracked release tree and all reachable Git
+runtime requirements and validates it with the pinned official SPDX tool, scans both
+the tracked release tree and all reachable Git
 history with the checksum-pinned Gitleaks binary, runs the real digest-pinned
 adapter smoke, and audits residual Docker resources. Build, CI, and verification
-environments install the complete dependency closure from `requirements-dev.lock`
-with pip hash checking, then install the local project or wheel with dependency
-resolution disabled. The
-lock is a checked projection of `uv.lock`; both versions and every accepted
-artifact SHA-256 must match.
+development, build, CI, and verification environments install the complete dependency
+closure from `requirements-dev.lock` with pip hash checking. Clean wheel and
+post-publication installation checks instead preinstall only the exact runtime closure
+from `requirements-runtime.lock`, then install the wheel with dependency resolution
+disabled. Both lockfiles are checked projections of `uv.lock`; versions and every
+accepted artifact SHA-256 must match.
 
 The smoke gate discovers the runnable catalogue IDs, requires every collected
 Docker smoke test to declare exactly one matching `lab_id` marker, and fails when

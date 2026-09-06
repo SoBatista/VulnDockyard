@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from .catalogue import ReviewedLab
 from .errors import IntegrityError, PolicyError, PreflightError
+from .httpio import fetch_bounded
 from .jsonio import StrictJSONError, strict_json_loads
 
 if TYPE_CHECKING:
@@ -95,9 +96,7 @@ def check_latest(
         headers={"Accept": "application/vnd.github+json", "User-Agent": "VulnDockyard/1"},
     )
     try:
-        response = opener(request, timeout=timeout)
-        with response:
-            payload = response.read(131_073)
+        payload = fetch_bounded(request, opener=opener, timeout=timeout, maximum=131_072)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise PreflightError(f"upstream release discovery failed: {exc}") from exc
     if len(payload) > 131_072:

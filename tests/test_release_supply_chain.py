@@ -9,17 +9,25 @@ from pathlib import Path
 import pytest
 from scripts import release as release_module
 from scripts import secret_scan
-from scripts.check_repository import _dependency_lock_failures
+from scripts.check_repository import _dependency_lock_failures, _requirement_records
 from scripts.check_version import _projection_state, check_release_ready
 from scripts.check_version import check as check_version
 from scripts.check_workflows import check as check_workflows
-from scripts.generate_sbom import generate
+from scripts.generate_sbom import generate, validate_spdx
 from scripts.release import _expected_artifacts, _release_metadata, _verify_sums
 from scripts.release_artifacts import changelog_notes
 
 
 def test_dependency_lock_matches_uv_lock() -> None:
     assert _dependency_lock_failures() == []
+
+
+def test_runtime_lock_contains_only_declared_runtime_dependencies() -> None:
+    records = _requirement_records(Path("requirements-runtime.lock"))
+
+    assert len(records) == 1
+    assert records[0].startswith("pyyaml==6.0.3 ")
+    assert "pytest" not in records[0]
 
 
 def test_every_canonical_version_projection_is_consistent() -> None:
@@ -109,6 +117,13 @@ def test_workflow_supply_chain_policy() -> None:
     check_workflows()
 
 
+def test_post_release_installs_pinned_verifier_before_validation() -> None:
+    workflow = Path(".github/workflows/post-release.yml").read_text(encoding="utf-8")
+    install = "pip install --disable-pip-version-check --require-hashes -r requirements-dev.lock"
+
+    assert workflow.index(install) < workflow.index("python scripts/release.py verify-published")
+
+
 def test_secret_scan_covers_tracked_tree_and_reachable_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -163,6 +178,27 @@ def test_sbom_contains_exact_runtime_dependency_relationship(tmp_path: Path) -> 
         "relatedSpdxElement": dependency["SPDXID"],
     } in sbom["relationships"]
     assert sbom["packages"][0]["packageVerificationCode"]["packageVerificationCodeValue"]
+    assert all(file["licenseConcluded"] == "NOASSERTION" for file in sbom["files"])
+    assert all(file["licenseInfoInFiles"] == ["NOASSERTION"] for file in sbom["files"])
+    assert all(file["copyrightText"] == "NOASSERTION" for file in sbom["files"])
+
+
+def test_official_spdx_validation_rejects_an_incomplete_file_record(tmp_path: Path) -> None:
+    wheel = tmp_path / "example-1.2.3-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("example/__init__.py", "")
+        archive.writestr(
+            "example-1.2.3.dist-info/METADATA",
+            "Metadata-Version: 2.3\nName: example\nVersion: 1.2.3\n",
+        )
+    output = tmp_path / "example.spdx.json"
+    generate(wheel, output)
+    sbom = json.loads(output.read_text(encoding="utf-8"))
+    del sbom["files"][0]["fileName"]
+    output.write_text(json.dumps(sbom), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="official SPDX validation"):
+        validate_spdx(output)
 
 
 def _write_release_fixture(root: Path, version: str) -> None:

@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 
 from .compose_policy import load_compose, validate_compose
 from .errors import IntegrityError, PolicyError, PreflightError
+from .httpio import fetch_bounded
 from .jsonio import StrictJSONError, strict_json_loads
 from .models import DIGEST, OCI_NAME
 from .paths import Paths, remove_owned_tree
@@ -371,8 +372,12 @@ class VulhubProvider:
             lock.archive_url, headers={"User-Agent": "VulnDockyard/1"}
         )
         try:
-            with _open_pinned_archive(request, timeout=timeout) as response:
-                archive = response.read(300_000_001)
+            archive = fetch_bounded(
+                request,
+                opener=_open_pinned_archive,
+                timeout=timeout,
+                maximum=300_000_000,
+            )
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise PreflightError(f"could not retrieve pinned Vulhub metadata: {exc}") from exc
         if len(archive) > 300_000_000:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
+import json
 import platform
 import sys
 from collections.abc import Mapping, Sequence
@@ -13,13 +15,13 @@ from typing import Any, Never
 from . import __version__
 from .catalogue import Catalogue, ReviewedLab
 from .docker import Docker
-from .errors import CancelledError, ExitCode, PreflightError, VulnDockyardError
+from .errors import CancelledError, ExitCode, PolicyError, PreflightError, VulnDockyardError
 from .hosts import HostsManager
 from .output import Output
 from .paths import Paths
 from .privilege import HELPER_PATHS, HELPER_SHA256, invoke_hosts_helper, packaged_helper
 from .provider import VulhubProvider
-from .runtime import Runtime, RuntimeStatus, port_available
+from .runtime import CleanupPreview, Runtime, RuntimeStatus, port_available
 from .updates import apply_reviewed_update, check_latest
 
 DESCRIPTION = "A provenance-aware local runner for intentionally vulnerable security labs."
@@ -122,9 +124,11 @@ def build_parser() -> Parser:
     )
     _lab_argument(reset)
     reset.add_argument("--yes", action="store_true", help="confirm destructive effects")
+    reset.add_argument("--preview-token", help="bind confirmation to a prior JSON preview")
     remove = commands.add_parser("remove", help="remove runtime resources but retain pulled images")
     _lab_argument(remove)
     remove.add_argument("--yes", action="store_true", help="confirm runtime removal")
+    remove.add_argument("--preview-token", help="bind confirmation to a prior JSON preview")
     purge = commands.add_parser(
         "purge", help="remove only attributable lab resources and generated state"
     )
@@ -133,6 +137,7 @@ def build_parser() -> Parser:
         "--images", action="store_true", help="also remove exact known image digests"
     )
     purge.add_argument("--yes", action="store_true", help="confirm destructive effects")
+    purge.add_argument("--preview-token", help="bind confirmation to a prior JSON preview")
     update = commands.add_parser("update", help="discover or apply a reviewed transactional update")
     update.add_argument("--check", action="store_true", help="read-only upstream release discovery")
     _lab_argument(update, optional=True)
@@ -171,6 +176,22 @@ def _lab_summary(lab: ReviewedLab) -> dict[str, object]:
 
 def _status_data(status: RuntimeStatus) -> dict[str, Any]:
     return dataclasses.asdict(status)
+
+
+def _destructive_preview_token(
+    cleanup_fingerprint: str,
+    *,
+    command: str,
+    image_references: tuple[str, ...],
+) -> str:
+    payload = {
+        "cleanup_fingerprint": cleanup_fingerprint,
+        "command": command,
+        "image_references": list(image_references),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _human_status(status: RuntimeStatus) -> str:
@@ -450,17 +471,36 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
     if command == "doctor":
         hosts_manager = HostsManager()
         result = _doctor(runtime.paths, hosts_manager)
+        previewing_hosts_repair = False
         stale_check = next(check for check in result["checks"] if check["name"] == "managed-hosts")
         stale_detail = stale_check["detail"]
         if args.repair_hosts and isinstance(stale_detail, dict) and stale_detail["stale"]:
-            _apply_hostnames(hosts_manager, tuple(stale_detail["stale"]), add=False, yes=args.yes)
-            result = _doctor(runtime.paths, hosts_manager)
+            repair = _apply_hostnames(
+                hosts_manager,
+                tuple(stale_detail["stale"]),
+                add=False,
+                yes=args.yes,
+                preview_only=output.json_mode and not args.yes,
+            )
+            result["hosts_repair"] = repair
+            if repair["applied"]:
+                result = _doctor(runtime.paths, hosts_manager)
+                result["hosts_repair"] = repair
+            else:
+                previewing_hosts_repair = True
         human = "\n".join(
             f"{'PASS' if check['ok'] else ('FAIL' if check['required'] else 'WARN')} "
             f"{check['name']}: {_doctor_detail(check)}"
             for check in result["checks"]
         )
-        if not result["ok"]:
+        blocking_checks = [
+            check
+            for check in result["checks"]
+            if check["required"]
+            and not check["ok"]
+            and (not previewing_hosts_repair or check["name"] != "managed-hosts")
+        ]
+        if blocking_checks:
             raise PreflightError(f"one or more required doctor checks failed:\n{human}")
         output.emit(command, result, human)
     elif command == "list":
@@ -550,6 +590,22 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
         output.emit(command, _status_data(status), _human_status(status))
     elif command in {"reset", "remove", "purge"}:
         lab = catalogue.get(args.lab)
+        cleanup_preview: CleanupPreview = runtime.cleanup_preview(lab)
+        image_references = (
+            tuple(image.reference for image in lab.lock.images)
+            if command == "purge" and args.images
+            else ()
+        )
+        preview_token = _destructive_preview_token(
+            cleanup_preview.fingerprint,
+            command=command,
+            image_references=image_references,
+        )
+        if args.preview_token is not None and args.preview_token != preview_token:
+            raise PolicyError(
+                "destructive preview token does not match this command, its image scope, "
+                "and the exact owned resources; review a new preview"
+            )
         effects = (
             lab.manifest.raw["reset"]["effects"]
             if command == "reset"
@@ -561,20 +617,56 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
             "lab_id": lab.manifest.id,
             "effects": effects,
             "owned_volume_names": list(lab.manifest.persistence_volumes),
-            "persistent_data_deleted": lab.manifest.persistence_required,
+            "present_owned_volume_names": list(cleanup_preview.volume_names),
+            "present_owned_resources": [
+                dataclasses.asdict(record) for record in cleanup_preview.resources
+            ],
+            "image_references": list(image_references),
+            "persistent_data_deleted": cleanup_preview.persistent_data_deleted,
+            "resource_fingerprint": cleanup_preview.fingerprint,
+            "preview_token": preview_token,
+            "applied": False,
         }
         effect_text = ", ".join(effects) if effects else "ephemeral runtime state"
+        present_text = (
+            "\n".join(
+                f"  - {record.kind}:{record.name} [{record.object_id}]"
+                for record in cleanup_preview.resources
+            )
+            or "  - none"
+        )
+        image_text = "\n".join(f"  - {reference}" for reference in image_references)
+        persistence_text = {
+            True: "yes",
+            False: "no",
+            None: "unknown (not represented as safe)",
+        }[cleanup_preview.persistent_data_deleted]
+        if output.json_mode and not args.yes:
+            output.emit(command, {"preview": preview, "status": None})
+            return
         if not output.json_mode:
-            print(f"Will remove: {effect_text}")
+            print(
+                f"Will remove: {effect_text}\nPresent owned resources:\n{present_text}\n"
+                + (f"Exact image references:\n{image_text}\n" if image_text else "")
+                + f"Persistent data deleted: {persistence_text}"
+            )
         _confirm(
             f"continue with {command} for {lab.manifest.id}; effects: {effect_text}",
             yes=args.yes,
         )
         status = (
-            runtime.purge(lab, images=args.images)
+            runtime.purge(
+                lab,
+                images=args.images,
+                expected_cleanup_fingerprint=cleanup_preview.fingerprint,
+            )
             if command == "purge"
-            else getattr(runtime, command)(lab)
+            else getattr(runtime, command)(
+                lab,
+                expected_cleanup_fingerprint=cleanup_preview.fingerprint,
+            )
         )
+        preview["applied"] = True
         output.emit(
             command,
             {"preview": preview, "status": _status_data(status)},

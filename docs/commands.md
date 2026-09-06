@@ -17,13 +17,13 @@ normal output excludes spoilers and flags. Stable exits are: 0 success, 2 usage,
 | `up LAB` / `start LAB` | Idempotent start; default gateway is `127.0.0.1:80`. |
 | `status [LAB]` | Requested reference, resolved digest, trust, run ID, and lock match. |
 | `verify LAB` | Identity and expected-functionality readiness plus lock match. |
-| `open LAB` / `logs LAB` | Open URL or show bounded application logs. |
+| `open LAB` / `logs LAB` | Open URL or show bounded application logs after revalidating the effective containment policy. |
 | `down LAB` / `stop LAB` | Idempotently stop, retain runtime and data. |
 | `restart LAB` | Stop/start the same locked deployment. |
 | `rebuild LAB` | Recreate only the same reviewed lock/reference; preserve every exactly owned declared persistent volume, and refuse stale, untrusted, missing, relabeled, or foreign-consumed state. |
-| `reset LAB --yes` | Preview exact declared volume names, delete only owned data, then create the declared clean state. |
-| `remove LAB --yes` | Remove owned runtime resources; retain images. |
-| `purge LAB --images --yes` | Remove owned state and optionally exact known digests. |
+| `reset LAB --yes` | Preview exact declared and currently present owned volume names, delete only owned data, then create the declared clean state. |
+| `remove LAB --yes` | Preview and remove exact owned runtime resources; retain images. |
+| `purge LAB --images --yes` | Preview owned state and optionally exact known digests before removal. |
 | `update --check [LAB]` | Read-only stable release discovery. |
 | `update LAB` | Transactionally activate one installed reviewed candidate; refuse discovery-only versions and a missing LAB. |
 | `hosts add/remove [LAB]` | Preview and atomically edit only the managed block through the verified helper. |
@@ -51,7 +51,8 @@ Docker operations are always bounded. Advanced users may configure validated
 seconds with `VDY_TIMEOUT_PULL`, `VDY_TIMEOUT_START`, `VDY_TIMEOUT_HEALTH`,
 `VDY_TIMEOUT_STOP`, `VDY_TIMEOUT_CLEANUP`, and `VDY_TIMEOUT_INSPECT`. Each variable
 has a finite accepted range; invalid, zero, negative, or unbounded values fail the
-preflight. Readiness uses Python's built-in bounded HTTP client, so no external
+preflight. Readiness and metadata retrieval use a size-bounded streaming reader
+under one caller-visible wall-clock deadline, so no external
 `curl` or `wget` executable is required. Its effective deadline is the lower of
 `VDY_TIMEOUT_HEALTH` and the reviewed manifest timeout. `pull`, `up`, and update
 activation also fail before pulling when any required image omits the validated
@@ -68,6 +69,19 @@ these cleanup commands resolve its journal without creating or starting containe
 Observational `status`, `logs`, `open`, and `verify` commands never recover a
 pending update; they fail with explicit execution-recovery and cleanup-recovery
 choices instead of unexpectedly starting a vulnerable lab.
+
+For `--json reset|remove|purge`, omitting `--yes` returns one deterministic,
+non-mutating preview document. A second invocation with `--yes` performs the
+operation. Pass its `preview_token` back with `--preview-token` to require an
+exact match. The token binds the command, the exact owned Docker resources, and
+the exact immutable image references requested by `purge --images`; a token for
+`remove` or a non-image purge cannot authorize a broader operation. Every mutation
+also binds the immediately computed resource preview and refuses if owned state
+changes before the lifecycle lock is reacquired. Human confirmation lists every
+present resource and every image reference in scope.
+An unknown persistence classification is reported as JSON `null`, never as a false
+claim. `--json doctor --repair-hosts` follows the same preview rule and never
+mixes prompts or human text into the JSON stream.
 
 This minimum prevents the isolated application bridge from receiving a default
 outbound route; it is a containment boundary, not a general compatibility floor.

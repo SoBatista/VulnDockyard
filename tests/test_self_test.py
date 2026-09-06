@@ -131,3 +131,21 @@ def test_smoke_checkpoint_loader_requires_a_terminal_machine_contract(
     (artifact / "smoke-report.json").write_text(json.dumps(report) + "\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="terminal contract"):
         self_test._load_smoke_report()
+
+
+def test_final_residual_inventory_makes_the_checkpoint_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report: dict[str, object] = {"residual_docker_resources": None}
+    monkeypatch.setattr(
+        self_test,
+        "_residual",
+        lambda: {"containers": ["owned-container"], "networks": [], "volumes": []},
+    )
+
+    assert not self_test._record_final_residual_audit(report)
+    assert report["residual_docker_resources"] == {
+        "containers": ["owned-container"],
+        "networks": [],
+        "volumes": [],
+    }

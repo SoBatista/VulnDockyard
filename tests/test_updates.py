@@ -33,7 +33,7 @@ class Response(io.BytesIO):
 def opener(tag: str):  # type: ignore[no-untyped-def]
     def open_response(request: object, *, timeout: float) -> Response:
         assert str(request).startswith("<urllib.request.Request")
-        assert timeout == 10
+        assert 0 < timeout <= 10
         return Response(f'{{"tag_name":"{tag}"}}'.encode())
 
     return open_response

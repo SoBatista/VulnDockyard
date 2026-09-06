@@ -17,11 +17,14 @@ scripts/self-test.sh
 ```
 
 `requirements-dev.lock` is the pip-consumable, fully hashed projection of
-`uv.lock`, including the runtime, build, test, and release closure. Refresh both
-only in a dependency-review change with `uv lock`, then
+`uv.lock`, including the runtime, build, test, and release closure.
+`requirements-runtime.lock` contains only the runtime closure used by clean wheel
+verification. Refresh all three only in a dependency-review change with `uv lock`, then
 `uv export --frozen --extra dev --no-emit-project --format requirements.txt
---no-header`. Repository checks reject missing packages, version drift, and any
-artifact hash that differs between the two locks.
+--no-header --output-file requirements-dev.lock` and
+`uv export --frozen --no-dev --no-emit-project --format requirements.txt
+--no-header --output-file requirements-runtime.lock`. Repository checks reject
+missing packages, version drift, and artifact hashes that differ between the locks.
 
 Do not run `.venv/bin/vulndockyard`, an editable install, or project Python code
 with `sudo`. Use the reviewed standalone helper contract described by

@@ -31,7 +31,7 @@
     "limitations": [
       "Provenance, containment, licensing, architecture, or functionality review is incomplete."
     ],
-    "status_reason": "The official application image is pinned, but the moving MariaDB dependency and setup/login/module smoke sequence have not been verified."
+    "status_reason": "Candidate official application and MariaDB digests are recorded, but upstream still references a moving database tag and the setup/login/module/reset sequence has not been verified."
   },
   "images": [
     {

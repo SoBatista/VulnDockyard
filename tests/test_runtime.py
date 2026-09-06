@@ -17,6 +17,7 @@ from vulndockyard.docker import (
     LAB,
     MANIFEST,
     OWNER,
+    ROLE,
     SEED_READY_MARKER,
     SEED_SCRIPT,
     Docker,
@@ -740,6 +741,7 @@ def test_persistent_rebuild_preserves_owned_data_and_reset_replaces_it(
     value, docker, packaged = runtime(xdg_paths)
     lab = persistent_review(packaged)
     started = value.up(lab, host_port=18080)
+    assert value.cleanup_preview(lab).persistent_data_deleted is True
     initial = value.store.load(lab.manifest.id)
     assert initial is not None and initial.phase == "steady"
     application = next(record for record in initial.resources if record.name.endswith("-app"))
@@ -974,12 +976,32 @@ def test_persistent_rebuild_adopts_exact_create_checkpoint_orphan(
     )
     assert all(record.object_id != orphan for record in pending.resources)
 
+    removed_before_preview = tuple(docker.removed)
+    preview = value.cleanup_preview(lab)
+    assert any(record.object_id == orphan for record in preview.resources)
+    assert tuple(docker.removed) == removed_before_preview
+
     monkeypatch.setattr(docker, "create_network", create_network)
     recovered = value.up(lab, host_port=18080)
     assert recovered.run_id == initial.run_id
     assert orphan in docker.removed
     assert all(record.object_id in docker.objects for record in volumes)
     assert value.remove(lab).state == "absent"
+
+
+def test_destructive_mutation_rejects_a_stale_preview_fingerprint(xdg_paths: Paths) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    preview = value.cleanup_preview(lab)
+    rebuilt = value.rebuild(lab)
+    resources_before_rejection = set(docker.objects)
+
+    with pytest.raises(PolicyError, match="no longer matches"):
+        value.remove(lab, expected_cleanup_fingerprint=preview.fingerprint)
+
+    assert set(docker.objects) == resources_before_rejection
+    retained = value.store.load(lab.manifest.id)
+    assert retained is not None and retained.run_id == rebuilt.run_id
 
 
 def test_persistent_update_refuses_before_pull_or_runtime_mutation(xdg_paths: Paths) -> None:
@@ -2640,7 +2662,39 @@ def test_health_uses_the_lower_reviewed_manifest_timeout(
 
     monkeypatch.setattr("vulndockyard.runtime._open_local_health", ready)
     Runtime(paths=xdg_paths, docker=docker)._health(reviewed, 18080)  # type: ignore[arg-type]
-    assert timeouts and set(timeouts) == {2.0}
+    assert timeouts and all(0 < timeout <= 2.0 for timeout in timeouts)
+
+
+def test_logs_reject_effective_application_policy_drift(xdg_paths: Paths) -> None:
+    value, docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    application = next(
+        inspection
+        for inspection in docker.objects.values()
+        if inspection.get("Config", {}).get("Labels", {}).get(ROLE) == "application"
+    )
+    application["HostConfig"]["Privileged"] = True
+
+    with pytest.raises(PolicyError, match="unsafe core runtime configuration"):
+        value.logs(lab, follow=False)
+
+
+def test_logs_reject_legacy_state_without_applicable_policy(xdg_paths: Paths) -> None:
+    value, _docker, lab = runtime(xdg_paths)
+    value.up(lab, host_port=18080)
+    state = value.store.load(lab.manifest.id)
+    assert state is not None
+    value.store.save(
+        dataclasses.replace(
+            state,
+            schema_version=2,
+            manifest_identity="e" * 64,
+            runtime_policy=None,
+        )
+    )
+
+    with pytest.raises(PolicyError, match="lacks an applicable reviewed containment policy"):
+        value.logs(lab, follow=False)
 
 
 def test_health_redirect_handler_never_follows_redirects() -> None:
@@ -2661,6 +2715,9 @@ def test_runtime_pull_verify_open_and_residual_audit(
     value, _docker, lab = runtime(xdg_paths)
     assert value.pull(lab) == tuple(image.reference for image in lab.manifest.images)
     value.up(lab, host_port=18080)
+    owned_volume_names = value.cleanup_preview(lab).volume_names
+    assert len(owned_volume_names) == 4
+    assert all(name.startswith("vdy-juice-shop-") for name in owned_volume_names)
     assert value.verify(lab).lock_match
     monkeypatch.setattr("vulndockyard.runtime.webbrowser.open", lambda url: True)
     assert value.open(lab) == "http://juice-shop.test:18080"

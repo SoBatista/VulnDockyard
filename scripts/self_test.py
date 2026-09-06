@@ -156,6 +156,17 @@ def _residual() -> dict[str, list[str]]:
     return {f"{kind}s": sorted(identifiers) for kind, identifiers in values.items()}
 
 
+def _record_final_residual_audit(report: dict[str, Any]) -> bool:
+    """Record a final inventory and return whether no owned Docker resource remains."""
+    try:
+        inventory = _residual()
+    except Exception as exc:
+        report["residual_docker_resources"] = {"audit_error": [str(exc)]}
+        return False
+    report["residual_docker_resources"] = inventory
+    return all(not identifiers for identifiers in inventory.values())
+
+
 def _checkpoint(report: dict[str, Any]) -> None:
     artifact_root = ROOT / "artifacts"
     artifact_root.mkdir(mode=0o700, exist_ok=True)
@@ -438,10 +449,7 @@ def main() -> int:
             _checkpoint(report)
             break
         _checkpoint(report)
-    try:
-        report["residual_docker_resources"] = _residual()
-    except Exception as exc:
-        report["residual_docker_resources"] = {"audit_error": [str(exc)]}
+    if not _record_final_residual_audit(report):
         failed = True
     report["finished_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     report["duration_seconds"] = round((datetime.now(UTC) - started_at).total_seconds(), 3)

@@ -34,6 +34,7 @@ dev = [
   "pytest==9.1.1",
   "pytest-cov==7.1.0",
   "ruff==0.16.5",
+  "spdx-tools==0.8.3",
   "types-PyYAML==6.0.12.20260815",
 ]
 
@@ -67,6 +68,7 @@ include = [
   "/LICENSE",
   "/README.md",
   "/requirements-dev.lock",
+  "/requirements-runtime.lock",
   "/SECURITY.md",
   "/SUPPORT.md",
   "/VERSION",

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import re
 import socket
 import threading
@@ -18,6 +20,7 @@ from typing import Any
 from .catalogue import Catalogue, ReviewedLab, identity, template_identity
 from .docker import MINIMUM_ENGINE_TEXT, ROLE, SEED_READY_MARKER, Docker, Ownership
 from .errors import IntegrityError, PolicyError, PreflightError, VulnDockyardError
+from .httpio import fetch_bounded
 from .models import DIGEST, OCI_NAME, AdapterStatus, EphemeralMount, Image
 from .paths import Paths
 from .state import ResourceRecord, RunState, RuntimePolicySnapshot, StateStore, UpdateJournal
@@ -46,6 +49,17 @@ class RuntimeUpdate:
     previous_run_id: str
     active_run_id: str
     status: RuntimeStatus
+
+
+@dataclass(frozen=True)
+class CleanupPreview:
+    resources: tuple[ResourceRecord, ...]
+    persistent_data_deleted: bool | None
+    fingerprint: str
+
+    @property
+    def volume_names(self) -> tuple[str, ...]:
+        return tuple(record.name for record in self.resources if record.kind == "volume")
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -503,21 +517,32 @@ class Runtime:
                 },
                 method="GET",
             )
-            while time.monotonic() < deadline:
+
+            def validate_response(response: object, expected_url: str = request.full_url) -> None:
+                geturl = getattr(response, "geturl", None)
+                if not callable(geturl) or geturl() != expected_url:
+                    raise IntegrityError("health response escaped its fixed loopback URL")
+
+            while (remaining := deadline - time.monotonic()) > 0:
                 try:
-                    with _open_local_health(request, timeout=min(3.0, health_timeout)) as response:
-                        if response.geturl() != request.full_url:
-                            raise IntegrityError("health response escaped its fixed loopback URL")
-                        body = response.read(262_145)
-                        if len(body) > 262_144:
-                            raise IntegrityError("health response exceeded 256 KiB")
-                        text = body.decode("utf-8", "replace")
-                        if identity.casefold() in text.casefold():
-                            break
-                        last_error = f"identity marker {identity!r} was absent"
+                    body = fetch_bounded(
+                        request,
+                        opener=_open_local_health,
+                        timeout=min(3.0, remaining),
+                        maximum=262_144,
+                        validate_response=validate_response,
+                    )
+                    if len(body) > 262_144:
+                        raise IntegrityError("health response exceeded 256 KiB")
+                    text = body.decode("utf-8", "replace")
+                    if identity.casefold() in text.casefold():
+                        break
+                    last_error = f"identity marker {identity!r} was absent"
                 except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
                     last_error = str(exc)
-                self.sleeper(0.5)
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    self.sleeper(min(0.5, remaining))
             else:
                 raise PreflightError(
                     "readiness and identity verification timed out for "
@@ -2292,8 +2317,11 @@ class Runtime:
             raise
         return self._status(lab)
 
-    def remove(self, lab: ReviewedLab) -> RuntimeStatus:
+    def remove(
+        self, lab: ReviewedLab, *, expected_cleanup_fingerprint: str | None = None
+    ) -> RuntimeStatus:
         with self._lifecycle():
+            self._assert_cleanup_fingerprint(lab, expected_cleanup_fingerprint)
             self._recover_update_for_cleanup(lab)
             self._recover_runtime_transients_for_cleanup(lab)
             return self._remove(lab)
@@ -2364,10 +2392,13 @@ class Runtime:
             self._remove(lab)
             return self._up(lab, host_port=port)
 
-    def reset(self, lab: ReviewedLab) -> RuntimeStatus:
+    def reset(
+        self, lab: ReviewedLab, *, expected_cleanup_fingerprint: str | None = None
+    ) -> RuntimeStatus:
         with self._lifecycle():
             self._require_runnable(lab)
             self._preflight_lab(lab)
+            self._assert_cleanup_fingerprint(lab, expected_cleanup_fingerprint)
             self._recover_update_for_cleanup(lab)
             pending = self.store.load(lab.manifest.id)
             port = pending.host_port if pending else 80
@@ -2407,8 +2438,15 @@ class Runtime:
             self._remove(lab)
             return self._up(lab, host_port=port)
 
-    def purge(self, lab: ReviewedLab, *, images: bool = False) -> RuntimeStatus:
+    def purge(
+        self,
+        lab: ReviewedLab,
+        *,
+        images: bool = False,
+        expected_cleanup_fingerprint: str | None = None,
+    ) -> RuntimeStatus:
         with self._lifecycle():
+            self._assert_cleanup_fingerprint(lab, expected_cleanup_fingerprint)
             self._recover_update_for_cleanup(lab)
             self._recover_runtime_transients_for_cleanup(lab)
             result = self._remove(lab)
@@ -2416,6 +2454,111 @@ class Runtime:
                 for image in lab.lock.images:
                     self.docker.remove_image(image.reference)
             return result
+
+    def cleanup_preview(self, lab: ReviewedLab) -> CleanupPreview:
+        """Return an ownership-validated destructive preview without changing state."""
+        with self._lifecycle():
+            return self._cleanup_preview_locked(lab)
+
+    def _cleanup_preview_locked(self, lab: ReviewedLab) -> CleanupPreview:
+        states: list[RunState] = []
+        current = self.store.load(lab.manifest.id)
+        if current is not None:
+            adopted = (
+                current
+                if current.runtime_policy is None
+                and current.manifest_identity != lab.manifest_identity
+                else self._adopt_journaled_candidate(lab, current)
+            )
+            if adopted.phase == "rebuild":
+                adopted = self._adopt_rollback_seeder(adopted, validate_policy=False)
+            states.append(adopted)
+        journal = self.store.load_update(lab.manifest.id)
+        if journal is not None:
+            candidate = self._adopt_journaled_candidate(lab, journal.candidate)
+            previous = self._adopt_rollback_gateway(journal.previous, validate_policy=False)
+            previous = self._adopt_rollback_seeder(previous, validate_policy=False)
+            states.extend((previous, candidate))
+        unique_states = {
+            (state.manifest_identity, state.run_id): state for state in states
+        }.values()
+        owned_records: dict[tuple[str, str], tuple[ResourceRecord, Ownership, bool | None]] = {}
+        for state in unique_states:
+            ownership = Ownership.from_state(state)
+            persistence = (
+                state.runtime_policy.persistence_required
+                if state.runtime_policy is not None
+                else None
+            )
+            for record in state.resources:
+                key = (record.kind, record.object_id)
+                prior_owned = owned_records.get(key)
+                if prior_owned is not None and prior_owned[1] != ownership:
+                    raise IntegrityError("runtime journals disagree about resource ownership")
+                owned_records[key] = (record, ownership, persistence)
+
+        managed = self.docker.managed_resources(lab_id=lab.manifest.id)
+        unknown = [
+            f"{kind}:{object_id}"
+            for kind in ("container", "network", "volume")
+            for object_id in managed[kind]
+            if (kind, object_id) not in owned_records
+        ]
+        if unknown:
+            raise PolicyError(
+                "managed Docker resources are absent from the exact runtime journals; "
+                f"destructive preview refuses ambiguous ownership ({', '.join(unknown)})"
+            )
+        descriptors: list[dict[str, object]] = []
+        resources: list[ResourceRecord] = []
+        persistence_values: list[bool | None] = []
+        for kind in ("container", "network", "volume"):
+            for object_id in sorted(managed[kind]):
+                record, ownership, persistence = owned_records[(kind, object_id)]
+                self.docker.validate_owned(record, ownership)
+                resources.append(record)
+                if kind == "volume":
+                    persistence_values.append(persistence)
+                descriptors.append(
+                    {
+                        "kind": record.kind,
+                        "name": record.name,
+                        "object_id": record.object_id,
+                        "manifest_identity": ownership.manifest_identity,
+                        "run_id": ownership.run_id,
+                    }
+                )
+        persistent_data_deleted: bool | None
+        if any(value is True for value in persistence_values):
+            persistent_data_deleted = True
+        elif any(value is None for value in persistence_values):
+            persistent_data_deleted = None
+        else:
+            persistent_data_deleted = False
+        fingerprint_payload = {
+            "lab_id": lab.manifest.id,
+            "resources": descriptors,
+            "persistent_data_deleted": persistent_data_deleted,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        ordered_resources = tuple(sorted(resources, key=lambda item: (item.kind, item.name)))
+        return CleanupPreview(ordered_resources, persistent_data_deleted, fingerprint)
+
+    def _assert_cleanup_fingerprint(
+        self, lab: ReviewedLab, expected_fingerprint: str | None
+    ) -> None:
+        if expected_fingerprint is None:
+            return
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_fingerprint):
+            raise PolicyError("destructive preview fingerprint is malformed")
+        actual = self._cleanup_preview_locked(lab)
+        if actual.fingerprint != expected_fingerprint:
+            raise PolicyError(
+                "approved destructive preview no longer matches the exact owned resources; "
+                "review a new preview"
+            )
 
     def logs(self, lab: ReviewedLab, *, follow: bool) -> str:
         with self._lifecycle():
@@ -2426,8 +2569,13 @@ class Runtime:
         state = self.store.load(lab.manifest.id)
         if state is None:
             raise PolicyError(f"{lab.manifest.id} has no managed runtime")
+        if state.runtime_policy is None and state.manifest_identity != lab.manifest_identity:
+            raise PolicyError(
+                "managed runtime lacks an applicable reviewed containment policy snapshot; "
+                "logs are unavailable until the runtime is explicitly removed or updated"
+            )
         self._assert_no_orphans(lab.manifest.id, state)
-        inspections = self._validate_state(state)
+        inspections = self._validate_state(state, lab=lab, enforce_policy=True)
         applications = [
             record
             for record, inspection in zip(state.resources, inspections, strict=True)

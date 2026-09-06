@@ -1,6 +1,3 @@
-# Generated from uv.lock; do not edit by hand.
-# Refresh with: uv lock && uv export --frozen --extra dev --no-emit-project --format requirements.txt --no-header
-# This lock intentionally includes every direct and transitive runtime, build, test, and release dependency.
 ast-serialize==0.9.0 \
     --hash=sha256:1514f4a39704e2e815f9fc675fc13f19f694f212086b520110840782cf3c5295 \
     --hash=sha256:161914666a21d48b681982146ac0fa4086ef099d91c637cf595387f5f06aa099 \
@@ -60,6 +57,14 @@ ast-serialize==0.9.0 \
     --hash=sha256:f3f0f3359cf0f22bf096b07021ffe6bf0ec88ac8a2cf7ce5f4701af973112faa \
     --hash=sha256:f8c824d822a2ac54ec4228b88c0d170ab0024cf285eeee57b9d4f994003fb553
     # via mypy
+beartype==0.22.9 \
+    --hash=sha256:8f82b54aa723a2848a56008d18875f91c1db02c32ef6a62319a002e3e25a975f \
+    --hash=sha256:d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2
+    # via spdx-tools
+boolean-py==5.0 \
+    --hash=sha256:60cbc4bad079753721d32649545505362c754e121570ada4658b852a3a318d95 \
+    --hash=sha256:ef28a70bd43115208441b53a045d1549e2f0ec6e3d08a9d142cbc41c1938e8d9
+    # via license-expression
 build==1.6.0 \
     --hash=sha256:bd2c8afc603e7a2e0ce70e2ea85f0a6d02043bafbd307f5bada0f98669eca5af \
     --hash=sha256:f7aaf1ebbb79178a02ba248bb524f2176b256017e17e8e4bd4289c7b38cc2bad
@@ -68,6 +73,10 @@ cfgv==3.5.0 \
     --hash=sha256:a8dc6b26ad22ff227d2634a65cb388215ce6cc96bbcc5cfde7641ae87e8dacc0 \
     --hash=sha256:d5b1034354820651caa73ede66a6294d6e95c1b00acc5e9b098e917404669132
     # via pre-commit
+click==8.5.0 \
+    --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360 \
+    --hash=sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34
+    # via spdx-tools
 colorama==0.4.6 ; os_name == 'nt' or sys_platform == 'win32' \
     --hash=sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44 \
     --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
@@ -322,6 +331,10 @@ librt==0.15.0 ; platform_python_implementation != 'PyPy' \
     --hash=sha256:f779070399f991400fc451719e0ea388eb7de313388bada2c127a35de05f798a \
     --hash=sha256:fa60887537e1d0cd2d9982269d33a709bf54b195cd2b9364fc0a758022af5bd9
     # via mypy
+license-expression==30.4.4 \
+    --hash=sha256:421788fdcadb41f049d2dc934ce666626265aeccefddd25e162a26f23bcbf8a4 \
+    --hash=sha256:73448f0aacd8d0808895bdc4b2c8e01a8d67646e4188f887375398c761f340fd
+    # via spdx-tools
 mypy==2.3.1 \
     --hash=sha256:114dff494000f18bd10d5d95d84b8567b26da60279ecbe838131841df20e635d \
     --hash=sha256:18162b128c3f9c703cd35f5537446900b0d21a2549aa7a95d21380d2ef643fb0 \
@@ -402,6 +415,10 @@ pluggy==1.6.0 \
     #   hatchling
     #   pytest
     #   pytest-cov
+ply==3.11 \
+    --hash=sha256:00c7c1aaa88358b9c765b6d3000c6eec0ba42abca5351b095321aef446081da3 \
+    --hash=sha256:096f9b8350b65ebd2fd1346b12452efe5b9607f7482813ffca50c22722a807ce
+    # via spdx-tools
 pre-commit==4.6.2 \
     --hash=sha256:8f5d7bfb021ecdbcd9d49d89847082dd24172ccde534390081a679ad046e2441 \
     --hash=sha256:e2dde9a75d3bce11bd3831c26d134df00a2803c1d818be6a0383c3dcda25dc4e
@@ -410,6 +427,10 @@ pygments==2.21.0 \
     --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9 \
     --hash=sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c
     # via pytest
+pyparsing==3.3.2 \
+    --hash=sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d \
+    --hash=sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc
+    # via rdflib
 pyproject-hooks==1.2.0 \
     --hash=sha256:1e859bd5c40fae9448642dd871adf459e5e2084186e8d2c2a79a824c970da1f8 \
     --hash=sha256:9e5c6bfa8dcc30091c74b0cf803c81fdd29d94f01992a7707bc97babb1141913
@@ -479,7 +500,12 @@ pyyaml==6.0.3 \
     --hash=sha256:fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0
     # via
     #   pre-commit
+    #   spdx-tools
     #   vulndockyard
+rdflib==7.6.0 \
+    --hash=sha256:30c0a3ebf4c0e09215f066be7246794b6492e054e782d7ac2a34c9f70a15e0dd \
+    --hash=sha256:6c831288d5e4a5a7ece85d0ccde9877d512a3d0f02d7c06455d00d6d0ea379df
+    # via spdx-tools
 ruff==0.16.5 \
     --hash=sha256:0eeab41fbea2c42f98dfb9822cdccda9d24ba38d49f6dc945b5c236d48f0ef29 \
     --hash=sha256:12e5f673e774c35fbb62f288809c7653b73445f8ecec6b6063fd6ea3521aa14b \
@@ -499,6 +525,14 @@ ruff==0.16.5 \
     --hash=sha256:ef0f69e191a13a3c9816f63163c88790cb12cd157bbbb384e9c44745702ab105 \
     --hash=sha256:f0768e9df4300713fff30733c87575f68b6f1d8de41184e505b7fdd9c0c95eaf \
     --hash=sha256:fb8e3a3c4c6a784150a7ced53b015f4b253fc2bf97a610886419ead64b4756ef
+    # via vulndockyard
+semantic-version==2.10.0 \
+    --hash=sha256:bdabb6d336998cbb378d4b9db3a4b56a1e3235701dc05ea2690d9a997ed5041c \
+    --hash=sha256:de78a3b8e0feda74cabc54aab2da702113e33ac9d9eb9d2389bcf1f58b7d9177
+    # via spdx-tools
+spdx-tools==0.8.3 \
+    --hash=sha256:638fd9bd8be61901316eb6d063574e16d5403a1870073ec4d9241426a997501a \
+    --hash=sha256:68b8f9ce2893b5216bd90b2e63f1c821c2884e4ebc4fd295ebbf1fa8b8a94b93
     # via vulndockyard
 tomli==2.4.1 ; python_full_version <= '3.11' \
     --hash=sha256:01f520d4f53ef97964a240a035ec2a869fe1a37dde002b57ebc4417a27ccd853 \
@@ -565,7 +599,15 @@ typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
     --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5
     # via mypy
+uritools==6.1.3 \
+    --hash=sha256:136f113e76e53f85bf2d9cce0c3d40ceec775d0409e7d6de9b28f046a7d42838 \
+    --hash=sha256:3a498e7e85ef3249343d5710618d641a414da0fbae6d23053ada7976ee83ea5f
+    # via spdx-tools
 virtualenv==21.7.8 \
     --hash=sha256:1dc49c790072a9072cb1803f9bd62aa69cd583077cada32390f75505cdc64c9b \
     --hash=sha256:3040eb3cbf5d32b10ffd57d167e6a162237ad82ba7d8cf1400a1efed593d85ac
     # via pre-commit
+xmltodict==1.0.4 \
+    --hash=sha256:6d94c9f834dd9e44514162799d344d815a3a4faec913717a9ecbfa5be1bb8e61 \
+    --hash=sha256:a4a00d300b0e1c59fc2bfccb53d7b2e88c32f200df138a0dd2229f842497026a
+    # via spdx-tools

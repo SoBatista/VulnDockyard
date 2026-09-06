@@ -345,7 +345,7 @@ def verify_published() -> None:
             "--disable-pip-version-check",
             "--require-hashes",
             "-r",
-            str(ROOT / "requirements-dev.lock"),
+            str(ROOT / "requirements-runtime.lock"),
         )
         _run(str(python), "-m", "pip", "install", "--no-deps", str(wheel))
         _run(str(python), "-m", "pip", "check")

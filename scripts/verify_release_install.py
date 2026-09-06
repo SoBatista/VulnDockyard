@@ -36,7 +36,7 @@ def main() -> int:
                 "--disable-pip-version-check",
                 "--require-hashes",
                 "-r",
-                str(ROOT / "requirements-dev.lock"),
+                str(ROOT / "requirements-runtime.lock"),
             ),
             check=True,
             timeout=180,

@@ -115,7 +115,8 @@ jobs:
             exit 0
           fi
           if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
-            .github/workflows/ci.yml pyproject.toml requirements-dev.lock uv.lock \
+            .github/workflows/ci.yml pyproject.toml requirements-dev.lock \
+            requirements-runtime.lock uv.lock \
             scripts src tests; then
             printf 'Only reviewed low-risk paths changed; Docker smoke is not required.\n'
             printf 'run_smoke=false\n' >> "$GITHUB_OUTPUT"

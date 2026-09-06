@@ -31,4 +31,17 @@ Target release: 1.0.0 (not yet released).
 - Apache-2.0 OSS governance, security, maintenance, CI, release, SBOM, and
   post-publication verification foundations.
 
+### Fixed
+
+- Validate generated SPDX 2.3 SBOMs with the pinned official SPDX tool, keep clean
+  installation checks free of development dependencies, and fail final checkpoints
+  when any managed Docker resource remains.
+- Enforce one wall-clock deadline for health and metadata HTTP reads, revalidate
+  containment before logs, surface Docker log failures, and make JSON destructive
+  and hosts-repair previews non-mutating. Destructive confirmations bind an exact
+  ownership-validated resource fingerprint and preserve honest persistence status.
+  Preview tokens additionally bind the command and exact image-removal scope, human
+  previews enumerate every resource and image, and legacy logs fail closed without
+  an applicable containment-policy snapshot.
+
 [Unreleased]: https://github.com/SoBatista/VulnDockyard/commits/main

@@ -14,7 +14,7 @@ smoke test.
 
 | Lab | Status | Trust / exact blocker |
 |---|---|---|
-| OWASP Juice Shop 20.2.0 | runnable | `upstream-pinned`; official release automation, locked multi-arch index, GitHub-hosted amd64 identity/challenge/lifecycle smoke passed with the Docker 28 minimum enforced; no verified image signature. |
+| OWASP Juice Shop 20.2.0 | runnable | `upstream-pinned`; official release automation, immutable multi-arch index with amd64 verified, GitHub-hosted amd64 identity/challenge/lifecycle smoke passed with the Docker 28 minimum enforced; arm64 and an image signature are not verified. |
 | WebGoat/WebWolf 2025.3 | quarantined | Official locked image exists; dual-app registration, WebWolf tools, reset, timezone, and containment smoke remain. |
 | OWASP crAPI 1.1.6 | quarantined | Its ten-service deployment mixes version-substituted crAPI images, fixed mutable tags, and `latest`; no complete immutable image set or happy-path verification exists. |
 | DVWA | quarantined | Official application and database candidate digests are recorded, but the upstream deployment reference moves; the setup/login/module/reset combination is not yet verified. |

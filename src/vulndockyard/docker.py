@@ -1578,7 +1578,7 @@ class Docker:
             args.append("--follow")
         args.append(record.object_id)
         # Following is intentionally bounded as well; users can repeat it.
-        return self._run(tuple(args), timeout=300, check=False)
+        return self._run(tuple(args), timeout=300)
 
     def remove_image(self, reference: str) -> None:
         parse_image_reference(reference)

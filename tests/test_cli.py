@@ -9,11 +9,12 @@ from typing import Any
 import pytest
 
 import vulndockyard.cli as cli
-from vulndockyard.catalogue import ReviewedLab
+from vulndockyard.catalogue import Catalogue, ReviewedLab
 from vulndockyard.errors import CancelledError
 from vulndockyard.hosts import HostsManager, parse_managed_hosts
 from vulndockyard.paths import Paths
-from vulndockyard.runtime import RuntimeStatus, RuntimeUpdate
+from vulndockyard.runtime import CleanupPreview, RuntimeStatus, RuntimeUpdate
+from vulndockyard.state import ResourceRecord
 from vulndockyard.updates import UpdateCheck
 
 
@@ -54,14 +55,31 @@ class FakeRuntime:
     def rebuild(self, lab: ReviewedLab) -> RuntimeStatus:
         return status(lab)
 
-    def reset(self, lab: ReviewedLab) -> RuntimeStatus:
+    def reset(
+        self, lab: ReviewedLab, *, expected_cleanup_fingerprint: str | None = None
+    ) -> RuntimeStatus:
         return status(lab)
 
-    def remove(self, lab: ReviewedLab) -> RuntimeStatus:
+    def remove(
+        self, lab: ReviewedLab, *, expected_cleanup_fingerprint: str | None = None
+    ) -> RuntimeStatus:
         return status(lab, "absent")
 
-    def purge(self, lab: ReviewedLab, *, images: bool) -> RuntimeStatus:
+    def purge(
+        self,
+        lab: ReviewedLab,
+        *,
+        images: bool,
+        expected_cleanup_fingerprint: str | None = None,
+    ) -> RuntimeStatus:
         return status(lab, "absent")
+
+    def cleanup_preview(self, lab: ReviewedLab) -> CleanupPreview:
+        return CleanupPreview(
+            (ResourceRecord("volume", "vdy-juice-shop-owned-data", "owned-volume-id"),),
+            False,
+            "f" * 64,
+        )
 
     def logs(self, lab: ReviewedLab, *, follow: bool) -> str:
         return "bounded logs\n"
@@ -202,6 +220,14 @@ def test_json_destructive_command_is_one_document(
         "tmp",
     ]
     assert document["data"]["preview"]["persistent_data_deleted"] is False
+    assert document["data"]["preview"]["present_owned_volume_names"] == [
+        "vdy-juice-shop-owned-data"
+    ]
+    assert document["data"]["preview"]["image_references"] == []
+    assert document["data"]["preview"]["applied"] is True
+    assert document["data"]["preview"]["resource_fingerprint"] == "f" * 64
+    assert len(document["data"]["preview"]["preview_token"]) == 64
+    assert document["data"]["preview"]["preview_token"] != "f" * 64
     assert document["data"]["status"]["lock_match"] is True
 
 
@@ -219,6 +245,59 @@ def test_runtime_removal_preview_names_every_owned_resource_kind(
         "owned volumes",
         "generated state",
     ]
+    assert document["data"]["preview"]["present_owned_resources"] == [
+        {
+            "kind": "volume",
+            "name": "vdy-juice-shop-owned-data",
+            "object_id": "owned-volume-id",
+        }
+    ]
+
+
+def test_purge_preview_token_binds_exact_image_scope(
+    isolated_cli: type[FakeRuntime], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["--json", "purge", "juice-shop"]) == 0
+    narrow = json.loads(capsys.readouterr().out)["data"]["preview"]
+    assert narrow["image_references"] == []
+
+    assert cli.main(["--json", "purge", "juice-shop", "--images"]) == 0
+    broad = json.loads(capsys.readouterr().out)["data"]["preview"]
+    reviewed = Catalogue().get("juice-shop")
+    assert broad["image_references"] == [image.reference for image in reviewed.lock.images]
+    assert broad["preview_token"] != narrow["preview_token"]
+
+    assert (
+        cli.main(
+            [
+                "--json",
+                "purge",
+                "juice-shop",
+                "--images",
+                "--yes",
+                "--preview-token",
+                narrow["preview_token"],
+            ]
+        )
+        == 4
+    )
+    assert "does not match this command" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+    assert (
+        cli.main(
+            [
+                "--json",
+                "purge",
+                "juice-shop",
+                "--images",
+                "--yes",
+                "--preview-token",
+                broad["preview_token"],
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["data"]["preview"]["applied"] is True
 
 
 def test_stable_error_codes_and_json_errors(
@@ -267,7 +346,30 @@ def test_destructive_command_requires_confirmation_noninteractively(
     assert cli.main(["reset", "juice-shop"]) == 8
     captured = capsys.readouterr()
     assert "Will remove" in captured.out
+    assert "volume:vdy-juice-shop-owned-data [owned-volume-id]" in captured.out
     assert "confirmation required" in captured.err
+
+
+def test_json_destructive_preview_is_non_mutating_without_yes(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        FakeRuntime,
+        "reset",
+        lambda self, lab: (_ for _ in ()).throw(AssertionError("reset must not run")),
+    )
+
+    assert cli.main(["--json", "reset", "juice-shop"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    document = json.loads(captured.out)
+    assert document["data"]["status"] is None
+    assert document["data"]["preview"]["applied"] is False
+    assert document["data"]["preview"]["present_owned_volume_names"] == [
+        "vdy-juice-shop-owned-data"
+    ]
 
 
 def test_update_check_and_noop_apply(
@@ -553,6 +655,34 @@ def test_doctor_repairs_only_stale_managed_hosts(
     assert manager.preview("juice-shop.test", add=True).before == ("juice-shop.test",)
     assert b"# unrelated\n" in path.read_bytes()
     assert "PASS managed-hosts" in capsys.readouterr().out
+
+
+def test_json_doctor_hosts_repair_is_one_non_mutating_preview_without_yes(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "hosts"
+    original = b"127.0.0.1 localhost\n# unrelated\n"
+    path.write_bytes(original)
+    path.chmod(0o644)
+    manager = HostsManager(path)
+    manager.apply("removed-lab.test", add=True)
+    before = path.read_bytes()
+    FixtureHostsManager.fixture_path = path
+    monkeypatch.setattr(cli, "HostsManager", FixtureHostsManager)
+    monkeypatch.setattr(cli, "Docker", DoctorDocker)
+    monkeypatch.setattr(cli, "port_available", lambda port: True)
+
+    assert cli.main(["--json", "doctor", "--repair-hosts"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    document = json.loads(captured.out)
+    assert document["data"]["hosts_repair"]["applied"] is False
+    assert document["data"]["hosts_repair"]["hostnames"] == ["removed-lab.test"]
+    assert path.read_bytes() == before
 
 
 def test_direct_confirmation_interactive_paths(monkeypatch: pytest.MonkeyPatch) -> None:

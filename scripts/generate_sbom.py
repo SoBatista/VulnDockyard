@@ -11,6 +11,9 @@ import zipfile
 from email.parser import BytesParser
 from pathlib import Path
 
+from spdx_tools.spdx.parser.parse_anything import parse_file
+from spdx_tools.spdx.validation.document_validator import validate_full_spdx_document
+
 REQUIREMENT = re.compile(
     r"^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
     r"(?:\[(?P<extras>[A-Za-z0-9._,-]+)\])?"
@@ -25,6 +28,18 @@ def _identifier(value: str) -> str:
 
 def _normalized_name(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def validate_spdx(path: Path) -> None:
+    """Parse and validate an SPDX 2.x document with the official SPDX tool."""
+    try:
+        document = parse_file(str(path))
+        messages = validate_full_spdx_document(document)
+    except Exception as exc:  # SPDX exposes several format-specific parser exceptions.
+        raise RuntimeError(f"official SPDX validation could not parse the document: {exc}") from exc
+    if messages:
+        detail = "; ".join(message.validation_message for message in messages)
+        raise RuntimeError(f"official SPDX validation rejected the document: {detail}")
 
 
 def _runtime_dependencies(metadata: object) -> tuple[list[dict[str, object]], list[dict[str, str]]]:
@@ -112,6 +127,9 @@ def generate(wheel: Path, output: Path) -> None:
                 {
                     "SPDXID": identifier,
                     "fileName": member,
+                    "licenseConcluded": "NOASSERTION",
+                    "licenseInfoInFiles": ["NOASSERTION"],
+                    "copyrightText": "NOASSERTION",
                     "checksums": [
                         {"algorithm": "SHA1", "checksumValue": sha1},
                         {"algorithm": "SHA256", "checksumValue": digest},
@@ -173,6 +191,7 @@ def generate(wheel: Path, output: Path) -> None:
         ],
     }
     output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    validate_spdx(output)
 
 
 def main(argv: list[str] | None = None) -> int:
