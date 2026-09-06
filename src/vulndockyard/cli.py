@@ -23,6 +23,16 @@ from .runtime import Runtime, RuntimeStatus, port_available
 from .updates import apply_reviewed_update, check_latest
 
 DESCRIPTION = "A provenance-aware local runner for intentionally vulnerable security labs."
+DOCKER_ISOLATION_REASON = (
+    "Docker Engine 28.0.0 or newer is required because VulnDockyard relies on isolated "
+    "IPv4 bridge gateway mode to prevent the internal application network from receiving "
+    "a default outbound route."
+)
+DOCKER_MINT_GUIDANCE = (
+    "Linux Mint: identify the Ubuntu base release for your Mint version, follow Docker's "
+    "official Ubuntu Engine installation instructions to upgrade manually, then rerun "
+    "vulndockyard doctor. VulnDockyard never installs or modifies Docker."
+)
 __all__ = ["HELPER_SHA256", "main"]
 
 
@@ -285,6 +295,8 @@ def _doctor(paths: Paths, hosts_manager: HostsManager | None = None) -> dict[str
                     "server": detail["engine"],
                     "parsed": detail.get("engine_version"),
                     "minimum": detail.get("minimum_engine"),
+                    "reason": DOCKER_ISOLATION_REASON,
+                    "linux_mint_upgrade": DOCKER_MINT_GUIDANCE,
                 },
             }
         )
@@ -352,6 +364,16 @@ def _doctor(paths: Paths, hosts_manager: HostsManager | None = None) -> dict[str
     }
 
 
+def _doctor_detail(check: Mapping[str, object]) -> object:
+    detail = check["detail"]
+    if check["name"] != "docker-engine-isolation" or not isinstance(detail, dict):
+        return detail
+    status = f"server={detail.get('server')}; minimum={detail.get('minimum')}"
+    if check["ok"]:
+        return f"{status}; {detail.get('reason')}"
+    return f"{status}; {detail.get('reason')} {detail.get('linux_mint_upgrade')}"
+
+
 def _completion(shell: str) -> str:
     commands = (
         "help version doctor list search info trust pull up start open status logs reset rebuild "
@@ -389,7 +411,7 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
             result = _doctor(runtime.paths, hosts_manager)
         human = "\n".join(
             f"{'PASS' if check['ok'] else ('FAIL' if check['required'] else 'WARN')} "
-            f"{check['name']}: {check['detail']}"
+            f"{check['name']}: {_doctor_detail(check)}"
             for check in result["checks"]
         )
         if not result["ok"]:

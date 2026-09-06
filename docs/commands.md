@@ -59,6 +59,13 @@ application bridge can use isolated IPv4 gateway mode. `pull`, `up`, `update`,
 server version. `stop`/`down`, `remove`, `purge`, and the residual-resource audit
 remain available for exact owned-resource recovery.
 
+This minimum prevents the isolated application bridge from receiving a default
+outbound route; it is a containment boundary, not a general compatibility floor.
+On Linux Mint, identify the Ubuntu base release for the installed Mint version,
+then follow Docker's official Ubuntu Engine installation instructions to upgrade
+manually to Engine 28.0.0 or newer. Rerun `vulndockyard doctor` afterward.
+VulnDockyard never installs, upgrades, or modifies Docker automatically.
+
 `/etc/hosts` is the only privileged operation. Install the helper reported by
 `hosts helper` as `/usr/local/libexec/vulndockyard-hosts`, owned by `root:root`
 and mode `0755`. The CLI rejects a symlink, a writable helper or parent directory,

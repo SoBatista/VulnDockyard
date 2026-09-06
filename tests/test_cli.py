@@ -326,6 +326,7 @@ def test_doctor_success_and_repair_flag_parse(
     captured = capsys.readouterr()
     assert "PASS docker-engine" in captured.out
     assert "PASS docker-engine-isolation" in captured.out
+    assert "isolated IPv4 bridge gateway mode" in captured.out
 
 
 def test_doctor_advisory_failures_do_not_fail(
@@ -371,6 +372,10 @@ def test_doctor_fails_when_engine_cannot_enforce_isolated_gateway_mode(
     assert cli.main(["doctor"]) == 5
     captured = capsys.readouterr()
     assert "FAIL docker-engine-isolation" in captured.err
+    assert "prevent the internal application network" in captured.err
+    assert "Linux Mint" in captured.err
+    assert "upgrade manually" in captured.err
+    assert "never installs or modifies Docker" in captured.err
 
 
 def test_doctor_repairs_only_stale_managed_hosts(
