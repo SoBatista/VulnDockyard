@@ -68,6 +68,12 @@
     "pids": 1024,
     "read_only_root": false
   },
+  "ephemeral_storage": {
+    "uid": 0,
+    "gid": 0,
+    "seeded": [],
+    "empty": []
+  },
   "persistence": {
     "required": true,
     "volumes": []

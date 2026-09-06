@@ -36,6 +36,7 @@ def template_identity(manifest: Manifest) -> str:
         "initialization",
         "reset",
         "resources",
+        "ephemeral_storage",
         "persistence",
         "outbound_network",
         "dangerous_capabilities",

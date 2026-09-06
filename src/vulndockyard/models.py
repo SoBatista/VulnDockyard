@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -23,6 +24,11 @@ OCI_NAME = re.compile(
     r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?|localhost)(?::[1-9][0-9]{0,4})?/"
     r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$"
 )
+EPHEMERAL_NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+MAX_EPHEMERAL_MOUNTS = 32
+MAX_EPHEMERAL_SIZE_MB = 4_096
+MAX_EPHEMERAL_TOTAL_MB = 8_192
+MAX_CONTAINER_PATH_LENGTH = 4_096
 
 
 class TrustLevel(StrEnum):
@@ -187,6 +193,108 @@ class Service:
         )
 
 
+def _container_path(value: object, context: str) -> str:
+    path = _string(value, context)
+    parts = path.split("/")
+    if (
+        len(path) > MAX_CONTAINER_PATH_LENGTH
+        or not path.isascii()
+        or not path.isprintable()
+        or not path.startswith("/")
+        or path == "/"
+        or "," in path
+        or "\\" in path
+        or any(part in {"", ".", ".."} for part in parts[1:])
+        or str(PurePosixPath(path)) != path
+    ):
+        raise IntegrityError(f"{context} must be a safe absolute normalized container path")
+    return path
+
+
+@dataclass(frozen=True)
+class EphemeralMount:
+    name: str
+    container_path: str
+    size_mb: int
+
+    @classmethod
+    def parse(cls, value: object, context: str) -> EphemeralMount:
+        data = _mapping(value, context)
+        _require_exact(data, {"name", "container_path", "size_mb"}, context)
+        name = _string(data["name"], f"{context}.name")
+        if EPHEMERAL_NAME.fullmatch(name) is None:
+            raise IntegrityError(
+                f"{context}.name must be a stable lowercase ephemeral storage name"
+            )
+        size_mb = data["size_mb"]
+        if (
+            not isinstance(size_mb, int)
+            or isinstance(size_mb, bool)
+            or not 1 <= size_mb <= MAX_EPHEMERAL_SIZE_MB
+        ):
+            raise IntegrityError(f"{context}.size_mb must be between 1 and {MAX_EPHEMERAL_SIZE_MB}")
+        return cls(
+            name, _container_path(data["container_path"], f"{context}.container_path"), size_mb
+        )
+
+
+@dataclass(frozen=True)
+class EphemeralStorage:
+    uid: int
+    gid: int
+    seeded: tuple[EphemeralMount, ...]
+    empty: tuple[EphemeralMount, ...]
+
+    @classmethod
+    def parse(cls, value: object) -> EphemeralStorage:
+        data = _mapping(value, "ephemeral_storage")
+        _require_exact(data, {"uid", "gid", "seeded", "empty"}, "ephemeral_storage")
+        identifiers: dict[str, int] = {}
+        for key in ("uid", "gid"):
+            identifier = data[key]
+            if (
+                not isinstance(identifier, int)
+                or isinstance(identifier, bool)
+                or not 0 <= identifier <= 65_535
+            ):
+                raise IntegrityError(f"ephemeral_storage.{key} must be between 0 and 65535")
+            identifiers[key] = identifier
+
+        groups: dict[str, tuple[EphemeralMount, ...]] = {}
+        for key in ("seeded", "empty"):
+            values = _sequence(data[key], f"ephemeral_storage.{key}")
+            if len(values) > MAX_EPHEMERAL_MOUNTS:
+                raise IntegrityError(
+                    f"ephemeral_storage.{key} exceeds the {MAX_EPHEMERAL_MOUNTS}-mount limit"
+                )
+            groups[key] = tuple(
+                EphemeralMount.parse(item, f"ephemeral_storage.{key}[{index}]")
+                for index, item in enumerate(values)
+            )
+
+        mounts = groups["seeded"] + groups["empty"]
+        names = [mount.name for mount in mounts]
+        if len(names) != len(set(names)):
+            raise IntegrityError(
+                "ephemeral_storage seeded and empty mount names must be unique and disjoint"
+            )
+        paths = [mount.container_path for mount in mounts]
+        if len(paths) != len(set(paths)):
+            raise IntegrityError("ephemeral_storage container paths must be unique")
+        parsed_paths = [PurePosixPath(path) for path in paths]
+        if any(
+            left in right.parents or right in left.parents
+            for index, left in enumerate(parsed_paths)
+            for right in parsed_paths[index + 1 :]
+        ):
+            raise IntegrityError("ephemeral_storage container paths must not overlap")
+        if sum(mount.size_mb for mount in mounts) > MAX_EPHEMERAL_TOTAL_MB:
+            raise IntegrityError(
+                f"ephemeral_storage exceeds the {MAX_EPHEMERAL_TOTAL_MB} MiB aggregate limit"
+            )
+        return cls(identifiers["uid"], identifiers["gid"], groups["seeded"], groups["empty"])
+
+
 MANIFEST_KEYS = {
     "schema_version",
     "id",
@@ -206,6 +314,7 @@ MANIFEST_KEYS = {
     "reset",
     "default_credentials",
     "resources",
+    "ephemeral_storage",
     "persistence",
     "outbound_network",
     "dangerous_capabilities",
@@ -231,6 +340,7 @@ class Manifest:
     adapter_status: AdapterStatus
     images: tuple[Image, ...]
     services: tuple[Service, ...]
+    ephemeral_storage: EphemeralStorage
     friendly_hostname: str
     outbound_required: bool
     status_reason: str
@@ -394,15 +504,27 @@ class Manifest:
         if not isinstance(resource_data["read_only_root"], bool):
             raise IntegrityError("resources.read_only_root must be boolean")
 
+        ephemeral_storage = EphemeralStorage.parse(data["ephemeral_storage"])
+
         persistence = _mapping(data["persistence"], "persistence")
         _require_exact(persistence, {"required", "volumes"}, "persistence")
         if not isinstance(persistence["required"], bool):
             raise IntegrityError("persistence.required must be boolean")
         persistence_volumes = _string_list(persistence["volumes"], "persistence.volumes")
-        if status is AdapterStatus.RUNNABLE and (persistence["required"] or persistence_volumes):
-            raise IntegrityError(
-                "persistent runnable adapters require an implemented reviewed volume lifecycle"
-            )
+        if len(persistence_volumes) != len(set(persistence_volumes)):
+            raise IntegrityError("persistence.volumes must be unique")
+        if status is AdapterStatus.RUNNABLE:
+            if persistence["required"]:
+                raise IntegrityError(
+                    "persistent runnable adapters require an implemented reviewed volume lifecycle"
+                )
+            scratch_names = {
+                mount.name for mount in ephemeral_storage.seeded + ephemeral_storage.empty
+            }
+            if set(persistence_volumes) != scratch_names:
+                raise IntegrityError(
+                    "runnable persistence.volumes must exactly identify owned ephemeral storage"
+                )
 
         verification = _mapping(data["verification"], "verification")
         _require_exact(verification, {"status", "platforms", "evidence"}, "verification")
@@ -443,6 +565,7 @@ class Manifest:
             adapter_status=status,
             images=images,
             services=services,
+            ephemeral_storage=ephemeral_storage,
             friendly_hostname=hostname,
             outbound_required=outbound["required"],
             status_reason=status_reason,

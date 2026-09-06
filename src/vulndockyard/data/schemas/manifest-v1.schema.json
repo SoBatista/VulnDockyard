@@ -23,6 +23,7 @@
     "reset",
     "default_credentials",
     "resources",
+    "ephemeral_storage",
     "persistence",
     "outbound_network",
     "dangerous_capabilities",
@@ -119,6 +120,32 @@
         "identity_regex": {
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    "ephemeralMount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "container_path",
+        "size_mb"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        },
+        "container_path": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^/(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[,\\\\])(?!.*/$)[ -~]+$"
+        },
+        "size_mb": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
         }
       }
     }
@@ -344,6 +371,42 @@
         },
         "read_only_root": {
           "type": "boolean"
+        }
+      }
+    },
+    "ephemeral_storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uid",
+        "gid",
+        "seeded",
+        "empty"
+      ],
+      "properties": {
+        "uid": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "gid": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "seeded": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/ephemeralMount"
+          }
+        },
+        "empty": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/ephemeralMount"
+          }
         }
       }
     },

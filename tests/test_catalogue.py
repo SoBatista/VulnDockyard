@@ -56,6 +56,124 @@ def test_juice_shop_records_the_gateway_only_caddy_capability_exception() -> Non
     ]
 
 
+def test_juice_shop_declares_only_bounded_owned_ephemeral_storage() -> None:
+    raw = Catalogue().get("juice-shop").manifest.raw
+    storage = raw["ephemeral_storage"]
+    assert storage["uid"] == 65532
+    assert storage["gid"] == 65532
+    assert {
+        (mount["name"], mount["container_path"], mount["size_mb"]) for mount in storage["seeded"]
+    } == {
+        ("data", "/juice-shop/data", 64),
+        ("ftp", "/juice-shop/ftp", 32),
+        ("frontend", "/juice-shop/frontend/dist/frontend", 64),
+        ("csaf", "/juice-shop/.well-known/csaf", 2),
+    }
+    assert {
+        (mount["name"], mount["container_path"], mount["size_mb"]) for mount in storage["empty"]
+    } == {
+        ("i18n", "/juice-shop/i18n", 16),
+        ("logs", "/juice-shop/logs", 16),
+        ("uploads-complaints", "/juice-shop/uploads/complaints", 16),
+        ("tmp", "/tmp", 16),  # noqa: S108 - reviewed in-container scratch mount
+    }
+    assert raw["resources"]["read_only_root"] is True
+    assert raw["persistence"] == {
+        "required": False,
+        "volumes": [
+            "data",
+            "ftp",
+            "frontend",
+            "csaf",
+            "i18n",
+            "logs",
+            "uploads-complaints",
+            "tmp",
+        ],
+    }
+
+
+def test_quarantined_labs_have_explicit_empty_ephemeral_storage_contracts() -> None:
+    for lab in Catalogue().all():
+        if lab.manifest.adapter_status.value == "runnable":
+            continue
+        assert lab.manifest.raw["ephemeral_storage"] == {
+            "uid": 0,
+            "gid": 0,
+            "seeded": [],
+            "empty": [],
+        }
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value["ephemeral_storage"].update({"uid": True}), "uid"),
+        (lambda value: value["ephemeral_storage"].update({"gid": -1}), "gid"),
+        (
+            lambda value: value["ephemeral_storage"]["seeded"][0].update({"extra": "unsafe"}),
+            "unknown extra",
+        ),
+        (
+            lambda value: value["ephemeral_storage"]["seeded"][0].update(
+                {"container_path": "juice-shop/data"}
+            ),
+            "absolute normalized",
+        ),
+        (
+            lambda value: value["ephemeral_storage"]["seeded"][0].update(
+                {"container_path": "/juice-shop/../data"}
+            ),
+            "absolute normalized",
+        ),
+        (
+            lambda value: value["ephemeral_storage"]["seeded"][0].update(
+                {"container_path": "/juice-shop/data\n"}
+            ),
+            "absolute normalized",
+        ),
+        (
+            lambda value: value["ephemeral_storage"]["empty"][0].update({"name": "data"}),
+            "unique and disjoint",
+        ),
+        (
+            lambda value: value["ephemeral_storage"]["empty"][0].update(
+                {"container_path": "/juice-shop/data"}
+            ),
+            "paths must be unique",
+        ),
+        (
+            lambda value: value["ephemeral_storage"]["empty"][0].update(
+                {"container_path": "/juice-shop/data/cache"}
+            ),
+            "paths must not overlap",
+        ),
+        (
+            lambda value: value["ephemeral_storage"]["empty"][0].update({"size_mb": 0}),
+            "size_mb",
+        ),
+        (
+            lambda value: value["ephemeral_storage"]["empty"][0].update({"size_mb": True}),
+            "size_mb",
+        ),
+    ],
+)
+def test_ephemeral_storage_contract_fails_closed(
+    mutation: object, message: str, juice_shop: object
+) -> None:
+    raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    mutation(raw)  # type: ignore[operator]
+    with pytest.raises(IntegrityError, match=message):
+        Manifest.parse(raw)
+
+
+def test_template_identity_binds_ephemeral_storage(juice_shop: object) -> None:
+    manifest = juice_shop.manifest  # type: ignore[attr-defined]
+    raw = copy.deepcopy(manifest.raw)
+    raw["ephemeral_storage"]["empty"][0]["size_mb"] += 1
+    assert template_identity(Manifest.parse(raw)) != template_identity(manifest)
+
+
 def test_quarantined_lab_refuses_image_reference() -> None:
     lab = Catalogue().get("bwapp")
     assert lab.manifest.adapter_status.value == "quarantined"

@@ -82,6 +82,12 @@
     "pids": 256,
     "read_only_root": false
   },
+  "ephemeral_storage": {
+    "uid": 0,
+    "gid": 0,
+    "seeded": [],
+    "empty": []
+  },
   "persistence": {
     "required": false,
     "volumes": []
@@ -120,4 +126,3 @@
     "https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application"
   ]
 }
-

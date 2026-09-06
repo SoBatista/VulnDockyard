@@ -13,6 +13,22 @@ role mismatches, and every missing digest on a runnable adapter. JSON Schema is
 provided for editors and external tooling; tests keep its required fields aligned
 with the parser.
 
+`ephemeral_storage` declares every writable mount needed by a read-only
+application root. `uid` and `gid` are numeric ownership IDs. `seeded` mounts are
+initialized from the corresponding directory in the locked application image;
+`empty` mounts intentionally begin blank. Every mount is exactly
+`{name, container_path, size_mb}`. Names and container paths are unique across
+both groups, mount paths must be absolute normalized POSIX paths and may not nest
+or overlap, and sizes are bounded to 1–4096 MiB per mount and 8192 MiB in total.
+At most 32 mounts may appear in either group. Quarantined adapters retain an
+explicit empty contract until their writable paths and ownership are reviewed.
+
+Scratch volume names are also listed in `persistence.volumes` so ownership and
+cleanup can be audited. `persistence.required: false` means these volumes contain
+no retained user data: rebuild may preserve them, while reset and remove discard
+them according to the lifecycle contract. It does not turn an ephemeral scratch
+volume into persistent application data.
+
 Trust levels are `upstream-signed`, `upstream-pinned`, `vulndockyard-built`, and
 `quarantined`. Digest pinning is mandatory for runnable images but proves only
 immutability. Origin, license, architecture, verification, and limitations are
@@ -26,6 +42,6 @@ Docker execution is always `repository@sha256:...`.
 For the generic controller backend, `template_sha256` is the canonical SHA-256 of
 the manifest fields that drive rendering: backend, images, services, hostname,
 health and initialization, lifecycle/reset, resource and persistence policy,
-egress, and dangerous-capability declarations. The catalogue recomputes it before
-any runnable adapter can load. Quarantined adapters may leave it empty because no
-runtime template is approved.
+ephemeral writable-storage policy, egress, and dangerous-capability declarations.
+The catalogue recomputes it before any runnable adapter can load. Quarantined
+adapters may leave it empty because no runtime template is approved.

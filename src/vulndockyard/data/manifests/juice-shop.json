@@ -98,11 +98,68 @@
     "memory_mb": 512,
     "cpus": 0.5,
     "pids": 256,
-    "read_only_root": false
+    "read_only_root": true
+  },
+  "ephemeral_storage": {
+    "uid": 65532,
+    "gid": 65532,
+    "seeded": [
+      {
+        "name": "data",
+        "container_path": "/juice-shop/data",
+        "size_mb": 64
+      },
+      {
+        "name": "ftp",
+        "container_path": "/juice-shop/ftp",
+        "size_mb": 32
+      },
+      {
+        "name": "frontend",
+        "container_path": "/juice-shop/frontend/dist/frontend",
+        "size_mb": 64
+      },
+      {
+        "name": "csaf",
+        "container_path": "/juice-shop/.well-known/csaf",
+        "size_mb": 2
+      }
+    ],
+    "empty": [
+      {
+        "name": "i18n",
+        "container_path": "/juice-shop/i18n",
+        "size_mb": 16
+      },
+      {
+        "name": "logs",
+        "container_path": "/juice-shop/logs",
+        "size_mb": 16
+      },
+      {
+        "name": "uploads-complaints",
+        "container_path": "/juice-shop/uploads/complaints",
+        "size_mb": 16
+      },
+      {
+        "name": "tmp",
+        "container_path": "/tmp",
+        "size_mb": 16
+      }
+    ]
   },
   "persistence": {
     "required": false,
-    "volumes": []
+    "volumes": [
+      "data",
+      "ftp",
+      "frontend",
+      "csaf",
+      "i18n",
+      "logs",
+      "uploads-complaints",
+      "tmp"
+    ]
   },
   "outbound_network": {
     "required": false,

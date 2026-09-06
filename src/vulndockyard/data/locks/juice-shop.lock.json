@@ -24,7 +24,7 @@
       "role": "gateway"
     }
   ],
-  "template_sha256": "sha256:a7676b7db93136581fff39e25169aad64f92fd45037b9013c8d05c8e99911166",
+  "template_sha256": "sha256:e23aa8246a26e28d6e34f76b23ea8a46044c6a7b8b4479e2f867b5472f3037ce",
   "source_sha256": "",
   "build_recipe_revision": "",
   "trust_evidence": [
