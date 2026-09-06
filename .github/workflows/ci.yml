@@ -38,6 +38,33 @@ jobs:
       - name: Run deterministic controller gates
         run: scripts/ci-check.sh
 
+  python-compatibility:
+    name: python-${{ matrix.python-version }}-compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Check out reviewed tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up tested Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: ""
+      - name: Install exact development dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r requirements-dev.lock
+          python -m pip install --disable-pip-version-check --no-deps --no-build-isolation -e .
+      - name: Exercise supported-version compatibility
+        run: |
+          python -m pytest -m 'not docker and not smoke' --no-cov
+          python -m vulndockyard version
+
   dependency-review:
     name: dependency-review
     if: github.event_name == 'pull_request'

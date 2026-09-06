@@ -207,6 +207,27 @@ def check() -> None:
                     failures.append(
                         f"ci.yml: Docker smoke classifier lacks fail-closed marker: {required}"
                     )
+            compatibility = jobs.get("python-compatibility", {})
+            if not isinstance(compatibility, dict):
+                failures.append("ci.yml: supported-Python compatibility matrix is required")
+            else:
+                strategy = compatibility.get("strategy", {})
+                matrix = strategy.get("matrix", {}) if isinstance(strategy, dict) else {}
+                versions = matrix.get("python-version") if isinstance(matrix, dict) else None
+                if versions != ["3.12", "3.13"] or strategy.get("fail-fast") not in {
+                    False,
+                    "false",
+                }:
+                    failures.append("ci.yml: Python 3.12 and 3.13 matrix must fail independently")
+                compatibility_text = str(compatibility)
+                for required in (
+                    "python -m pytest -m 'not docker and not smoke' --no-cov",
+                    "python -m vulndockyard version",
+                ):
+                    if required not in compatibility_text:
+                        failures.append(
+                            f"ci.yml: Python compatibility job lacks required check: {required}"
+                        )
         for match in re.finditer(r"retention-days:\s*(\d+)", text):
             if int(match.group(1)) > 7:
                 failures.append(f"{path.name}: artifact retention exceeds seven days")
