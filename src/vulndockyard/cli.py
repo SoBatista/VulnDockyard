@@ -520,7 +520,12 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
         )
         if command == "purge" and args.images:
             effects = [*effects, "known immutable image digests"]
-        preview = {"lab_id": lab.manifest.id, "effects": effects}
+        preview = {
+            "lab_id": lab.manifest.id,
+            "effects": effects,
+            "owned_volume_names": list(lab.manifest.persistence_volumes),
+            "persistent_data_deleted": lab.manifest.persistence_required,
+        }
         effect_text = ", ".join(effects) if effects else "ephemeral runtime state"
         if not output.json_mode:
             print(f"Will remove: {effect_text}")

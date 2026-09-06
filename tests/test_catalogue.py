@@ -57,7 +57,8 @@ def test_juice_shop_records_the_gateway_only_caddy_capability_exception() -> Non
 
 
 def test_juice_shop_declares_only_bounded_owned_ephemeral_storage() -> None:
-    raw = Catalogue().get("juice-shop").manifest.raw
+    manifest = Catalogue().get("juice-shop").manifest
+    raw = manifest.raw
     storage = raw["ephemeral_storage"]
     assert storage["uid"] == 65532
     assert storage["gid"] == 65532
@@ -91,6 +92,73 @@ def test_juice_shop_declares_only_bounded_owned_ephemeral_storage() -> None:
             "tmp",
         ],
     }
+    assert manifest.persistence_required is False
+    assert manifest.persistence_volumes == (
+        "data",
+        "ftp",
+        "frontend",
+        "csaf",
+        "i18n",
+        "logs",
+        "uploads-complaints",
+        "tmp",
+    )
+
+
+def test_runnable_persistent_storage_requires_an_exact_root_owned_mount_set(
+    juice_shop: object,
+) -> None:
+    raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    raw["ephemeral_storage"].update({"uid": 0, "gid": 0})
+    raw["persistence"]["required"] = True
+
+    manifest = Manifest.parse(raw)
+
+    assert manifest.persistence_required is True
+    assert manifest.persistence_volumes == tuple(raw["persistence"]["volumes"])
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda value: (
+                value["ephemeral_storage"].update({"uid": 0, "gid": 0}),
+                value["persistence"].update({"required": True, "volumes": ["data"]}),
+            ),
+            "exactly identify declared writable storage",
+        ),
+        (
+            lambda value: (
+                value["ephemeral_storage"].update({"uid": 0, "gid": 0, "seeded": [], "empty": []}),
+                value["persistence"].update({"required": True, "volumes": []}),
+            ),
+            "at least one declared writable mount",
+        ),
+        (
+            lambda value: value["persistence"].update({"required": True}),
+            "storage uid and gid 0",
+        ),
+    ],
+)
+def test_runnable_persistent_storage_contract_fails_closed(
+    mutation: object, message: str, juice_shop: object
+) -> None:
+    raw = copy.deepcopy(juice_shop.manifest.raw)  # type: ignore[attr-defined]
+    mutation(raw)  # type: ignore[operator]
+    with pytest.raises(IntegrityError, match=message):
+        Manifest.parse(raw)
+
+
+def test_quarantined_persistence_metadata_does_not_require_runnable_storage_contract() -> None:
+    catalogue = Catalogue()
+    bwapp = catalogue.get("bwapp").manifest
+    shepherd = catalogue.get("security-shepherd").manifest
+
+    assert bwapp.persistence_required is True
+    assert bwapp.persistence_volumes == ("database", "application-writes")
+    assert shepherd.persistence_required is True
+    assert shepherd.persistence_volumes == ()
 
 
 def test_quarantined_labs_have_explicit_empty_ephemeral_storage_contracts() -> None:
@@ -365,10 +433,6 @@ def test_runnable_cannot_omit_digest(juice_shop: object) -> None:
         (
             lambda value: value["initialization"].update({"automatic": False}),
             "automatic initialization",
-        ),
-        (
-            lambda value: value["persistence"].update({"required": True, "volumes": ["data"]}),
-            "reviewed volume lifecycle",
         ),
         (
             lambda value: value["resources"].update({"memory_mb": 20_000}),

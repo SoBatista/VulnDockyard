@@ -120,6 +120,7 @@ def _runtime_policy(lab: ReviewedLab) -> RuntimePolicySnapshot:
         lab.manifest.friendly_hostname,
         timeout,
         lab.manifest.services,
+        lab.manifest.persistence_required,
     )
 
 
@@ -294,19 +295,30 @@ class Runtime:
         if policy is not None:
             prefix = f"vdy-{state.lab_id}-{state.run_id[:12]}"
             storage = policy.ephemeral_storage
-            mounts = {f"{prefix}-volume-{mount.name}": mount for mount in storage.seeded}
+            named_storage = (
+                storage.seeded + storage.empty if policy.persistence_required else storage.seeded
+            )
+            mounts = {f"{prefix}-volume-{mount.name}": mount for mount in named_storage}
             volumes = [record for record in state.resources if record.kind == "volume"]
-            unexpected = {record.name for record in volumes}.difference(mounts)
-            if unexpected:
-                raise PolicyError("managed runtime contains unreviewed seeded storage")
+            actual_volume_names = {record.name for record in volumes}
+            exact_storage_required = state.runtime_policy is not None
+            if (
+                len(volumes) != len(actual_volume_names)
+                or not actual_volume_names.issubset(mounts)
+                or (exact_storage_required and actual_volume_names != set(mounts))
+            ):
+                raise PolicyError("managed runtime named storage differs from the reviewed policy")
             for record in volumes:
-                self.docker.validate_ephemeral_volume(
-                    record,
-                    ownership,
-                    mounts[record.name],
-                    uid=storage.uid,
-                    gid=storage.gid,
-                )
+                if policy.persistence_required:
+                    self.docker.validate_persistent_volume(record, ownership)
+                else:
+                    self.docker.validate_ephemeral_volume(
+                        record,
+                        ownership,
+                        mounts[record.name],
+                        uid=storage.uid,
+                        gid=storage.gid,
+                    )
             records_by_name = {record.name: record for record in state.resources}
             inspections_by_name = {
                 record.name: inspection
@@ -320,6 +332,10 @@ class Runtime:
                     )
             app_name = f"{prefix}-app"
             if app_name in inspections_by_name:
+                if actual_volume_names != set(mounts):
+                    raise PolicyError(
+                        "managed application lacks its complete reviewed storage inventory"
+                    )
                 self.docker.validate_application_policy(
                     inspections_by_name[app_name],
                     image=state.requested_reference,
@@ -330,7 +346,7 @@ class Runtime:
                     seeded_mounts=tuple(
                         (records_by_name[name], mount) for name, mount in mounts.items()
                     ),
-                    empty_mounts=storage.empty,
+                    empty_mounts=() if policy.persistence_required else storage.empty,
                     storage_uid=storage.uid,
                     storage_gid=storage.gid,
                 )
@@ -533,7 +549,14 @@ class Runtime:
         if policy is None and state.manifest_identity == lab.manifest_identity:
             policy = _runtime_policy(lab)
         expected_volume_roles = (
-            {f"volume-{mount.name}" for mount in policy.ephemeral_storage.seeded}
+            {
+                f"volume-{mount.name}"
+                for mount in (
+                    policy.ephemeral_storage.seeded + policy.ephemeral_storage.empty
+                    if policy.persistence_required
+                    else policy.ephemeral_storage.seeded
+                )
+            }
             if policy is not None
             else set()
         )
@@ -595,8 +618,12 @@ class Runtime:
         storage = policy.ephemeral_storage
         prefix = f"vdy-{state.lab_id}-{state.run_id[:12]}"
         volumes = {record.name: record for record in state.resources if record.kind == "volume"}
-        seeded_mounts = tuple(
-            (volumes[f"{prefix}-volume-{mount.name}"], mount) for mount in storage.seeded
+        seeded_mounts = (
+            ()
+            if policy.persistence_required
+            else tuple(
+                (volumes[f"{prefix}-volume-{mount.name}"], mount) for mount in storage.seeded
+            )
         )
         containers = {
             self.docker._labels(record.kind, inspection).get(ROLE): record
@@ -715,17 +742,32 @@ class Runtime:
             ingress = self.docker.create_network(f"{prefix}-ingress", ownership, internal=False)
             resources.append(ingress)
             checkpoint()
+            volume_mounts: list[tuple[ResourceRecord, EphemeralMount]] = []
             seeded_mounts: list[tuple[ResourceRecord, EphemeralMount]] = []
-            for mount in storage.seeded:
-                volume = self.docker.create_ephemeral_volume(
-                    name=f"{prefix}-volume-{mount.name}",
-                    mount=mount,
-                    ownership=ownership,
-                    uid=storage.uid,
-                    gid=storage.gid,
+            named_storage = (
+                storage.seeded + storage.empty
+                if lab.manifest.persistence_required
+                else storage.seeded
+            )
+            seeded_names = {mount.name for mount in storage.seeded}
+            for mount in named_storage:
+                volume = (
+                    self.docker.create_persistent_volume(
+                        name=f"{prefix}-volume-{mount.name}", ownership=ownership
+                    )
+                    if lab.manifest.persistence_required
+                    else self.docker.create_ephemeral_volume(
+                        name=f"{prefix}-volume-{mount.name}",
+                        mount=mount,
+                        ownership=ownership,
+                        uid=storage.uid,
+                        gid=storage.gid,
+                    )
                 )
                 resources.append(volume)
-                seeded_mounts.append((volume, mount))
+                volume_mounts.append((volume, mount))
+                if mount.name in seeded_names:
+                    seeded_mounts.append((volume, mount))
                 checkpoint()
             seeder: ResourceRecord | None = None
             if seeded_mounts:
@@ -751,8 +793,8 @@ class Runtime:
                 cpus=cpus,
                 pids=pids,
                 read_only=read_only,
-                seeded_mounts=tuple(seeded_mounts),
-                empty_mounts=storage.empty,
+                seeded_mounts=tuple(volume_mounts),
+                empty_mounts=() if lab.manifest.persistence_required else storage.empty,
                 storage_uid=storage.uid,
                 storage_gid=storage.gid,
             )
@@ -877,6 +919,8 @@ class Runtime:
         self.paths.ensure()
         self._preflight_lab(lab)
         existing = self.store.load(lab.manifest.id)
+        if existing is not None and existing.phase == "rebuild":
+            return self._resume_persistent_rebuild(lab, existing)
         if existing is not None and existing.manifest_identity == lab.manifest_identity:
             # A process may be terminated after Docker creates an exact managed
             # object but before the following atomic state checkpoint. Recover only
@@ -899,6 +943,19 @@ class Runtime:
                 not self.docker.exists(record.kind, record.object_id)
                 for record in existing.resources
             )
+            missing_persistent_volume = (
+                existing.runtime_policy is not None
+                and existing.runtime_policy.persistence_required
+                and any(
+                    record.kind == "volume"
+                    and not self.docker.exists(record.kind, record.object_id)
+                    for record in existing.resources
+                )
+            )
+            if missing_persistent_volume:
+                raise PolicyError(
+                    "persistent runtime volume is missing; refusing automatic cleanup or repair"
+                )
             inspections = (
                 ()
                 if missing
@@ -910,6 +967,14 @@ class Runtime:
                 )
             )
             if missing or not self._complete_layout(lab, existing, inspections):
+                if (
+                    existing.runtime_policy is not None
+                    and existing.runtime_policy.persistence_required
+                ):
+                    self._validate_persistent_rebuild_resources(existing, existing.runtime_policy)
+                    rebuilding = replace(existing, phase="rebuild")
+                    self.store.save(rebuilding)
+                    return self._resume_persistent_rebuild(lab, rebuilding)
                 self._cleanup(existing)
                 self.store.delete(lab.manifest.id)
                 existing = None
@@ -1073,7 +1138,11 @@ class Runtime:
             ("network", f"{prefix}-ingress"),
             *(
                 ("volume", f"{prefix}-volume-{mount.name}")
-                for mount in policy.ephemeral_storage.seeded
+                for mount in (
+                    policy.ephemeral_storage.seeded + policy.ephemeral_storage.empty
+                    if policy.persistence_required
+                    else policy.ephemeral_storage.seeded
+                )
             ),
             ("container", f"{prefix}-seeder"),
             ("container", f"{prefix}-app"),
@@ -1108,16 +1177,23 @@ class Runtime:
                     storage_name = name.removeprefix(f"{prefix}-volume-")
                     mount = next(
                         value
-                        for value in policy.ephemeral_storage.seeded
+                        for value in (
+                            policy.ephemeral_storage.seeded + policy.ephemeral_storage.empty
+                            if policy.persistence_required
+                            else policy.ephemeral_storage.seeded
+                        )
                         if value.name == storage_name
                     )
-                    self.docker.validate_ephemeral_volume(
-                        record,
-                        ownership,
-                        mount,
-                        uid=policy.ephemeral_storage.uid,
-                        gid=policy.ephemeral_storage.gid,
-                    )
+                    if policy.persistence_required:
+                        self.docker.validate_persistent_volume(record, ownership)
+                    else:
+                        self.docker.validate_ephemeral_volume(
+                            record,
+                            ownership,
+                            mount,
+                            uid=policy.ephemeral_storage.uid,
+                            gid=policy.ephemeral_storage.gid,
+                        )
                 records.append(record)
                 names.add((kind, name))
         order = {item: index for index, item in enumerate(expected)}
@@ -1499,6 +1575,13 @@ class Runtime:
                 "it because recovery may execute a lab. Use up, update, or restart for explicit "
                 "execution recovery, or stop, remove, or purge for cleanup-only recovery"
             )
+        state = self.store.load(lab.manifest.id)
+        if state is not None and state.phase == "rebuild":
+            raise PolicyError(
+                "an interrupted persistent rebuild is pending; status, logs, open, and verify "
+                "never execute recovery. Use up, restart, or rebuild to resume it, or stop, "
+                "remove, reset, or purge for cleanup-only handling"
+            )
 
     def _recover_runtime_transients_for_cleanup(self, lab: ReviewedLab) -> None:
         state = self.store.load(lab.manifest.id)
@@ -1519,6 +1602,11 @@ class Runtime:
         with self._lifecycle():
             self._validate_candidate(lab)
             self._preflight_lab(lab)
+            current = self.store.load(lab.manifest.id)
+            if current is not None and current.phase != "steady":
+                raise PolicyError(
+                    "an interrupted persistent rebuild must be resolved before an update"
+                )
             self._recover_update(lab)
             previous = self.store.load(lab.manifest.id)
             if previous is None:
@@ -1542,6 +1630,13 @@ class Runtime:
                     previous.run_id,
                     previous.run_id,
                     status,
+                )
+            if lab.manifest.persistence_required or (
+                previous.runtime_policy is not None and previous.runtime_policy.persistence_required
+            ):
+                raise PolicyError(
+                    "transactional updates for persistent runtimes require a reviewed data "
+                    "migration policy; no image was pulled and the current deployment is unchanged"
                 )
             if not previous.trusted:
                 raise PolicyError(
@@ -1753,6 +1848,34 @@ class Runtime:
         for record, inspection in reversed(tuple(zip(state.resources, inspections, strict=True))):
             if record.kind == "container" and self._running(inspection):
                 self.docker.stop(record)
+        if state.phase == "rebuild":
+            current_inspections = self._validate_state(state)
+            resources = tuple(
+                {
+                    "kind": record.kind,
+                    "name": record.name,
+                    "id": record.object_id,
+                    "role": self.docker._labels(record.kind, inspection).get(ROLE, "unknown"),
+                    **(
+                        {"state": "running" if self._running(inspection) else "stopped"}
+                        if record.kind == "container"
+                        else {}
+                    ),
+                }
+                for record, inspection in zip(state.resources, current_inspections, strict=True)
+            )
+            return RuntimeStatus(
+                lab.manifest.id,
+                "degraded",
+                self.url(lab, state.host_port),
+                state.run_id,
+                state.requested_reference,
+                state.resolved_digest,
+                lab.manifest.trust.value if state.trusted else "untrusted-development",
+                state.trusted,
+                False,
+                resources,
+            )
         return self._status(lab)
 
     def restart(self, lab: ReviewedLab) -> RuntimeStatus:
@@ -1794,6 +1917,14 @@ class Runtime:
                 raise PolicyError(
                     "managed network is configured on an unowned container; refusing cleanup"
                 )
+        for volume in (record for record in validated if record.kind == "volume"):
+            foreign = self.docker.configured_volume_consumers(volume).difference(
+                owned_container_ids
+            )
+            if foreign:
+                raise PolicyError(
+                    "managed volume is configured on an unowned container; refusing cleanup"
+                )
         # Removal order is semantic and does not trust state-file ordering.
         for kind in ("container", "volume", "network"):
             for record in reversed(tuple(item for item in validated if item.kind == kind)):
@@ -1804,7 +1935,179 @@ class Runtime:
                     raise PolicyError(
                         "managed network still has configured container consumers; refusing cleanup"
                     )
+                if record.kind == "volume" and self.docker.configured_volume_consumers(record):
+                    raise PolicyError(
+                        "managed volume still has configured container consumers; refusing cleanup"
+                    )
                 self.docker.remove(record)
+
+    def _persistent_volume_records(
+        self, state: RunState, policy: RuntimePolicySnapshot
+    ) -> tuple[ResourceRecord, ...]:
+        if not policy.persistence_required:
+            raise PolicyError("persistent rebuild requires a persistent runtime snapshot")
+        prefix = f"vdy-{state.lab_id}-{state.run_id[:12]}"
+        expected_names = {
+            f"{prefix}-volume-{mount.name}"
+            for mount in policy.ephemeral_storage.seeded + policy.ephemeral_storage.empty
+        }
+        values = tuple(record for record in state.resources if record.kind == "volume")
+        actual_names = {record.name for record in values}
+        if len(values) != len(actual_names) or actual_names != expected_names:
+            raise PolicyError("persistent runtime volume inventory is incomplete or ambiguous")
+        return values
+
+    def _validate_persistent_rebuild_resources(
+        self, state: RunState, policy: RuntimePolicySnapshot
+    ) -> tuple[ResourceRecord, ...]:
+        self._assert_no_orphans(state.lab_id, state)
+        ownership = Ownership.from_state(state)
+        volumes = self._persistent_volume_records(state, policy)
+        existing_containers = {
+            record.object_id
+            for record in state.resources
+            if record.kind == "container" and self.docker.exists(record.kind, record.object_id)
+        }
+        for record in state.resources:
+            if record.kind == "volume" and not self.docker.exists(record.kind, record.object_id):
+                raise PolicyError(
+                    "persistent runtime volume is missing; refusing to recreate or replace data"
+                )
+            if self.docker.exists(record.kind, record.object_id):
+                self.docker.validate_owned(record, ownership)
+        for volume in volumes:
+            self.docker.validate_persistent_volume(volume, ownership)
+            foreign = self.docker.configured_volume_consumers(volume).difference(
+                existing_containers
+            )
+            if foreign:
+                raise PolicyError(
+                    "persistent volume is configured on an unowned container; refusing rebuild"
+                )
+        for network in (
+            record
+            for record in state.resources
+            if record.kind == "network" and self.docker.exists(record.kind, record.object_id)
+        ):
+            foreign = self.docker.configured_network_consumers(network).difference(
+                existing_containers
+            )
+            if foreign:
+                raise PolicyError(
+                    "managed network is configured on an unowned container; refusing rebuild"
+                )
+        return volumes
+
+    def _resume_persistent_rebuild(self, lab: ReviewedLab, state: RunState) -> RuntimeStatus:
+        policy = state.runtime_policy
+        if state.phase != "rebuild" or policy is None or not policy.persistence_required:
+            raise PolicyError("runtime does not contain a recoverable persistent rebuild")
+        if state.manifest_identity != lab.manifest_identity or policy != _runtime_policy(lab):
+            raise PolicyError("persistent rebuild state differs from the reviewed manifest")
+        application_image = _application_image(lab)
+        if (
+            not state.trusted
+            or state.requested_reference != application_image.reference
+            or state.resolved_digest != application_image.digest
+        ):
+            raise PolicyError("persistent rebuild state differs from the reviewed image lock")
+
+        for record in self._persistent_volume_records(state, policy):
+            if not self.docker.exists(record.kind, record.object_id):
+                raise PolicyError(
+                    "persistent runtime volume is missing; refusing to recreate or replace data"
+                )
+        adopted = self._adopt_journaled_candidate(lab, state)
+        if adopted != state:
+            self.store.save(adopted)
+            state = adopted
+        volumes = self._validate_persistent_rebuild_resources(state, policy)
+        ownership = Ownership.from_state(state)
+
+        # Clear only transient resources from the already-journaled ownership epoch.
+        # Every successful removal is atomically checkpointed; persistent volumes
+        # remain present and recorded throughout the operation.
+        for kind in ("container", "network"):
+            for record in reversed(tuple(item for item in state.resources if item.kind == kind)):
+                if self.docker.exists(record.kind, record.object_id):
+                    self.docker.validate_owned(record, ownership)
+                    if record.kind == "network" and self.docker.configured_network_consumers(
+                        record
+                    ):
+                        raise PolicyError(
+                            "managed network still has configured consumers during rebuild"
+                        )
+                    self.docker.remove(record)
+                state = replace(
+                    state,
+                    resources=tuple(item for item in state.resources if item != record),
+                )
+                self.store.save(state)
+
+        prefix = f"vdy-{state.lab_id}-{state.run_id[:12]}"
+        storage = policy.ephemeral_storage
+        mount_records = {record.name: record for record in volumes}
+        volume_mounts = tuple(
+            (mount_records[f"{prefix}-volume-{mount.name}"], mount)
+            for mount in storage.seeded + storage.empty
+        )
+
+        def checkpoint(record: ResourceRecord) -> None:
+            nonlocal state
+            state = replace(state, resources=(*state.resources, record))
+            self.store.save(state)
+
+        try:
+            network = self.docker.create_network(f"{prefix}-net", ownership, internal=True)
+            checkpoint(network)
+            ingress = self.docker.create_network(f"{prefix}-ingress", ownership, internal=False)
+            checkpoint(ingress)
+            application = self.docker.create_application(
+                name=f"{prefix}-app",
+                image=state.requested_reference,
+                network=network.name,
+                ownership=ownership,
+                memory_mb=policy.memory_mb,
+                cpus=policy.cpus,
+                pids=policy.pids,
+                read_only=policy.read_only_root,
+                seeded_mounts=volume_mounts,
+                empty_mounts=(),
+                storage_uid=storage.uid,
+                storage_gid=storage.gid,
+            )
+            checkpoint(application)
+            if state.gateway_reference is None or state.upstream_port is None:
+                raise PolicyError("persistent rebuild state lacks its gateway snapshot")
+            gateway = self.docker.create_gateway(
+                name=f"{prefix}-gateway",
+                image=state.gateway_reference,
+                network=ingress.name,
+                upstream_port=state.upstream_port,
+                host_port=state.host_port,
+                ownership=ownership,
+            )
+            checkpoint(gateway)
+            self._ensure_network_connected(network, gateway)
+            if policy.outbound_required:
+                self._ensure_network_connected(ingress, application)
+            self.docker.start(application)
+            if not self._running(self.docker.validate_owned(application, ownership)):
+                raise PreflightError("application did not remain running after persistent rebuild")
+            self.docker.start(gateway)
+            self._health_snapshot(policy, state.host_port)
+            steady = replace(state, phase="steady")
+            inspections = self._validate_state(steady, lab=lab, enforce_policy=True)
+            if not self._complete_layout(lab, steady, inspections):
+                raise IntegrityError(
+                    "persistent rebuild failed its exact steady-state layout check"
+                )
+            self.store.save(steady)
+        except BaseException:
+            # The phase remains recoverable. A later explicit execution command
+            # adopts exact create/checkpoint-window resources before retrying.
+            raise
+        return self._status(lab)
 
     def remove(self, lab: ReviewedLab) -> RuntimeStatus:
         with self._lifecycle():
@@ -1843,14 +2146,47 @@ class Runtime:
                         "preserved runtime image reference differs from the reviewed lock; "
                         "remove and start it explicitly"
                     )
+                if state.phase == "rebuild":
+                    return self._resume_persistent_rebuild(lab, state)
+                if state.runtime_policy is not None and state.runtime_policy.persistence_required:
+                    self._validate_persistent_rebuild_resources(state, state.runtime_policy)
+                    inspections = self._validate_state(state, lab=lab, enforce_policy=True)
+                    if not self._complete_layout(lab, state, inspections):
+                        raise PolicyError(
+                            "persistent runtime is not complete enough to begin a rebuild"
+                        )
+                    rebuilding = replace(state, phase="rebuild")
+                    self.store.save(rebuilding)
+                    return self._resume_persistent_rebuild(lab, rebuilding)
             port = state.host_port if state else 80
             self._remove(lab)
             return self._up(lab, host_port=port)
 
     def reset(self, lab: ReviewedLab) -> RuntimeStatus:
-        # The operation differs from rebuild when adapters declare volumes; current
-        # runnable v1 adapters are intentionally ephemeral and therefore converge.
-        return self.rebuild(lab)
+        with self._lifecycle():
+            self._require_runnable(lab)
+            self._preflight_lab(lab)
+            self._recover_update_for_cleanup(lab)
+            self._recover_runtime_transients_for_cleanup(lab)
+            state = self.store.load(lab.manifest.id)
+            if state is not None and state.manifest_identity != lab.manifest_identity:
+                raise PolicyError(
+                    "installed reviewed lock differs from the preserved runtime; use update"
+                )
+            if state is not None:
+                application = _application_image(lab)
+                if (
+                    not state.trusted
+                    or state.requested_reference != application.reference
+                    or state.resolved_digest != application.digest
+                ):
+                    raise PolicyError(
+                        "reset refuses an untrusted or differently locked runtime; remove it "
+                        "explicitly"
+                    )
+            port = state.host_port if state else 80
+            self._remove(lab)
+            return self._up(lab, host_port=port)
 
     def purge(self, lab: ReviewedLab, *, images: bool = False) -> RuntimeStatus:
         with self._lifecycle():

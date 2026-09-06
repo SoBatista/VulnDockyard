@@ -186,8 +186,22 @@ def application_inspection(
     uid: int = 65532,
     gid: int = 65532,
     mounts: list[dict[str, object]] | None = None,
+    configured_mounts: list[dict[str, object]] | None = None,
     tmpfs: dict[str, str] | None = None,
 ) -> dict[str, object]:
+    actual_mounts = mounts or []
+    if configured_mounts is None:
+        configured_mounts = [
+            {
+                "Type": "volume",
+                "Source": mount["Name"],
+                "Target": mount["Destination"],
+                "ReadOnly": False,
+                "VolumeOptions": {"NoCopy": True},
+            }
+            for mount in actual_mounts
+            if mount.get("Type") == "volume"
+        ]
     return {
         "Id": object_id,
         "Name": f"/{name}",
@@ -216,12 +230,13 @@ def application_inspection(
             "NanoCpus": round(cpus * 1_000_000_000),
             "PidsLimit": pids,
             "Tmpfs": tmpfs or {},
+            "Mounts": configured_mounts,
             "LogConfig": {
                 "Type": "local",
                 "Config": {"compress": "true", "max-file": "2", "max-size": "10m"},
             },
         },
-        "Mounts": (mounts or [])
+        "Mounts": actual_mounts
         + [
             {
                 "Type": "tmpfs",
@@ -398,7 +413,7 @@ def test_application_command_mounts_only_exact_reviewed_writable_paths() -> None
 
     call = next(call for call in runner.calls if call[3:5] == ("container", "create"))
     assert call[call.index("--mount") + 1] == (
-        "type=volume,src=vdy-juice-shop-cccccccccccc-volume-data,dst=/juice-shop/data"
+        "type=volume,src=vdy-juice-shop-cccccccccccc-volume-data,dst=/juice-shop/data,volume-nocopy"
     )
     assert call[call.index("--tmpfs") + 1] == (
         "/tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700"  # noqa: S108
@@ -494,6 +509,158 @@ def test_application_policy_rejects_effective_containment_drift() -> None:
     with pytest.raises(PolicyError, match="mount inventory differs"):
         validate(unexpected)
 
+    configured = application_inspection(
+        ownership(),
+        configured_mounts=[
+            {
+                "Type": "volume",
+                "Source": "vdy-juice-shop-cccccccccccc-volume-data",
+                "Target": "/data",
+                "ReadOnly": False,
+                "VolumeOptions": {"NoCopy": True},
+            }
+        ],
+    )
+    with pytest.raises(PolicyError, match="configured mount inventory differs"):
+        validate(configured)
+
+
+@pytest.mark.parametrize(
+    "volume_options",
+    ({}, {"NoCopy": False}, {"NoCopy": True, "Subpath": "nested"}),
+)
+def test_application_policy_requires_exact_volume_nocopy(
+    volume_options: dict[str, object],
+) -> None:
+    volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+    )
+    mount = EphemeralMount("data", "/juice-shop/data", 64)
+    inspection = application_inspection(
+        ownership(),
+        mounts=[
+            {
+                "Type": "volume",
+                "Name": volume.name,
+                "Destination": mount.container_path,
+                "RW": True,
+            }
+        ],
+        configured_mounts=[
+            {
+                "Type": "volume",
+                "Source": volume.name,
+                "Target": mount.container_path,
+                "ReadOnly": False,
+                "VolumeOptions": volume_options,
+            }
+        ],
+    )
+
+    with pytest.raises(PolicyError, match="exact volume-nocopy"):
+        Docker.validate_application_policy(
+            inspection,
+            image="registry.example.test/app@sha256:" + "1" * 64,
+            network="vdy-network",
+            memory_mb=512,
+            cpus=0.5,
+            pids=256,
+            seeded_mounts=((volume, mount),),
+            empty_mounts=(),
+            storage_uid=65532,
+            storage_gid=65532,
+        )
+
+
+@pytest.mark.parametrize("read_only", (None, True))
+def test_application_policy_requires_exactly_writable_configured_named_volume(
+    read_only: bool | None,
+) -> None:
+    volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+    )
+    mount = EphemeralMount("data", "/juice-shop/data", 64)
+    configured: dict[str, object] = {
+        "Type": "volume",
+        "Source": volume.name,
+        "Target": mount.container_path,
+        "VolumeOptions": {"NoCopy": True},
+    }
+    if read_only is not None:
+        configured["ReadOnly"] = read_only
+    inspection = application_inspection(
+        ownership(),
+        mounts=[
+            {
+                "Type": "volume",
+                "Name": volume.name,
+                "Destination": mount.container_path,
+                "RW": True,
+            }
+        ],
+        configured_mounts=[configured],
+    )
+
+    with pytest.raises(PolicyError, match="configured exactly writable"):
+        Docker.validate_application_policy(
+            inspection,
+            image="registry.example.test/app@sha256:" + "1" * 64,
+            network="vdy-network",
+            memory_mb=512,
+            cpus=0.5,
+            pids=256,
+            seeded_mounts=((volume, mount),),
+            empty_mounts=(),
+            storage_uid=65532,
+            storage_gid=65532,
+        )
+
+
+def test_application_policy_rejects_duplicate_configured_named_volumes() -> None:
+    volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+        "vdy-juice-shop-cccccccccccc-volume-data",
+    )
+    mount = EphemeralMount("data", "/juice-shop/data", 64)
+    configured: dict[str, object] = {
+        "Type": "volume",
+        "Source": volume.name,
+        "Target": mount.container_path,
+        "ReadOnly": False,
+        "VolumeOptions": {"NoCopy": True},
+    }
+    inspection = application_inspection(
+        ownership(),
+        mounts=[
+            {
+                "Type": "volume",
+                "Name": volume.name,
+                "Destination": mount.container_path,
+                "RW": True,
+            }
+        ],
+        configured_mounts=[configured, dict(configured)],
+    )
+
+    with pytest.raises(PolicyError, match="configured mount inventory differs"):
+        Docker.validate_application_policy(
+            inspection,
+            image="registry.example.test/app@sha256:" + "1" * 64,
+            network="vdy-network",
+            memory_mb=512,
+            cpus=0.5,
+            pids=256,
+            seeded_mounts=((volume, mount),),
+            empty_mounts=(),
+            storage_uid=65532,
+            storage_gid=65532,
+        )
+
 
 def test_seeded_volume_uses_exact_tmpfs_driver_options_and_identity() -> None:
     value = ownership()
@@ -550,6 +717,93 @@ def test_seeded_volume_policy_mismatch_removes_only_validated_volume() -> None:
         docker.create_ephemeral_volume(
             name=name, mount=mount, ownership=value, uid=65532, gid=65532
         )
+    assert runner.calls[-1][3:] == ("volume", "rm", name)
+
+
+@pytest.mark.parametrize("options", (None, {}))
+def test_persistent_volume_uses_local_driver_without_driver_options(
+    options: dict[str, str] | None,
+) -> None:
+    value = ownership()
+    name = "vdy-juice-shop-cccccccccccc-volume"
+    inspection = {
+        "Name": name,
+        "Driver": "local",
+        "Scope": "local",
+        "Options": options,
+        "Labels": role_labels(value, "volume"),
+    }
+    runner = RecordingRunner()
+    runner.responses = [
+        Result(("docker",), 0, f"{name}\n", ""),
+        Result(("docker",), 0, json.dumps([inspection]), ""),
+    ]
+    docker = Docker(runner, connection=fake_connection())
+
+    record = docker.create_persistent_volume(name=name, ownership=value)
+
+    assert record == ResourceRecord("volume", name, name)
+    create = runner.calls[0]
+    assert create[3:7] == ("volume", "create", "--driver", "local")
+    assert "--opt" not in create
+    assert f"{OWNER}=true" in create
+    assert create[-1] == name
+
+
+@pytest.mark.parametrize(
+    ("name", "error", "message"),
+    (
+        ("bad/name", IntegrityError, "resource name is malformed"),
+        ("unowned-volume", PolicyError, "deterministic name mismatch"),
+    ),
+)
+def test_persistent_volume_rejects_an_unsafe_name_before_docker(
+    name: str, error: type[Exception], message: str
+) -> None:
+    runner = RecordingRunner()
+    docker = Docker(runner, connection=fake_connection())
+
+    with pytest.raises(error, match=message):
+        docker.create_persistent_volume(name=name, ownership=ownership())
+
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message", "error"),
+    (
+        ("Driver", "other", "local scope and driver", PolicyError),
+        ("Scope", "global", "local scope and driver", PolicyError),
+        ("Options", {"type": "tmpfs"}, "driver options", PolicyError),
+        ("Options", [], "options are malformed", IntegrityError),
+    ),
+)
+def test_persistent_volume_policy_mismatch_removes_only_validated_volume(
+    field: str,
+    value: object,
+    message: str,
+    error: type[Exception],
+) -> None:
+    owner = ownership()
+    name = "vdy-juice-shop-cccccccccccc-volume"
+    inspection: dict[str, object] = {
+        "Name": name,
+        "Driver": "local",
+        "Scope": "local",
+        "Options": None,
+        "Labels": role_labels(owner, "volume"),
+    }
+    inspection[field] = value
+    runner = RecordingRunner()
+    runner.responses = [
+        Result(("docker",), 0, f"{name}\n", ""),
+        Result(("docker",), 0, json.dumps([inspection]), ""),
+    ]
+    docker = Docker(runner, connection=fake_connection())
+
+    with pytest.raises(error, match=message):
+        docker.create_persistent_volume(name=name, ownership=owner)
+
     assert runner.calls[-1][3:] == ("volume", "rm", name)
 
 
@@ -1193,6 +1447,113 @@ def test_configured_network_consumers_include_stopped_and_dangling_attachments()
     ]
 
     assert docker.configured_network_consumers(network) == {attached, dangling}
+    assert runner.calls[0][-5:] == (
+        "container",
+        "ls",
+        "--all",
+        "--no-trunc",
+        "--quiet",
+    )
+
+
+def test_configured_volume_consumers_include_stopped_and_unresolved_attachments() -> None:
+    runner = RecordingRunner()
+    docker = Docker(runner, connection=fake_connection())
+    volume = ResourceRecord(
+        "volume",
+        "vdy-juice-shop-cccccccccccc-volume",
+        "vdy-juice-shop-cccccccccccc-volume",
+    )
+    attached = "a" * 64
+    unresolved = "b" * 64
+    bind_configured = "c" * 64
+    unrelated = "d" * 64
+    runner.responses = [
+        Result(
+            ("docker",),
+            0,
+            f"{attached}\n{unresolved}\n{bind_configured}\n{unrelated}\n",
+            "",
+        ),
+        Result(
+            ("docker",),
+            0,
+            json.dumps(
+                [
+                    {
+                        "Id": attached,
+                        "State": {"Running": False},
+                        "HostConfig": {"Mounts": [], "Binds": None},
+                        "Mounts": [{"Type": "volume", "Name": volume.name}],
+                    }
+                ]
+            ),
+            "",
+        ),
+        Result(
+            ("docker",),
+            0,
+            json.dumps(
+                [
+                    {
+                        "Id": unresolved,
+                        "State": {"Running": False},
+                        "HostConfig": {
+                            "Binds": None,
+                            "Mounts": [
+                                {
+                                    "Type": "volume",
+                                    "Source": volume.name,
+                                    "Target": "/data",
+                                }
+                            ],
+                        },
+                        "Mounts": [],
+                    }
+                ]
+            ),
+            "",
+        ),
+        Result(
+            ("docker",),
+            0,
+            json.dumps(
+                [
+                    {
+                        "Id": bind_configured,
+                        "State": {"Running": False},
+                        "HostConfig": {
+                            "Mounts": None,
+                            "Binds": [f"{volume.name}:/data:rw"],
+                        },
+                        "Mounts": [],
+                    }
+                ]
+            ),
+            "",
+        ),
+        Result(
+            ("docker",),
+            0,
+            json.dumps(
+                [
+                    {
+                        "Id": unrelated,
+                        "State": {"Running": True},
+                        "HostConfig": {"Mounts": None, "Binds": ["/host-data:/data:ro"]},
+                        "Mounts": [{"Type": "bind", "Source": "/host-data"}],
+                    }
+                ]
+            ),
+            "",
+        ),
+    ]
+
+    assert docker.configured_volume_consumers(volume) == {
+        attached,
+        unresolved,
+        bind_configured,
+    }
     assert runner.calls[0][-5:] == (
         "container",
         "ls",

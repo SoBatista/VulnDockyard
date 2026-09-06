@@ -154,6 +154,16 @@ class FakeDocker:
                     )
                     for mount in values["empty_mounts"]
                 },
+                "Mounts": [
+                    {
+                        "Type": "volume",
+                        "Source": volume.name,
+                        "Target": mount.container_path,
+                        "ReadOnly": False,
+                        "VolumeOptions": {"NoCopy": True},
+                    }
+                    for volume, mount in values["seeded_mounts"]
+                ],
             },
             "Mounts": [
                 {
@@ -225,6 +235,28 @@ class FakeDocker:
         }
         if inspection.get("Driver") != "local" or inspection.get("Options") != expected:
             raise PolicyError("ephemeral volume has unexpected driver options")
+        return inspection
+
+    def create_persistent_volume(self, **values: Any) -> ResourceRecord:
+        self.create_count += 1
+        name = values["name"]
+        owner: Ownership = values["ownership"]
+        self.objects[name] = {
+            "Name": name,
+            "Driver": "local",
+            "Scope": "local",
+            "Options": {},
+            "Labels": self._label_map(owner, f"volume-{name.rsplit('-volume-', 1)[-1]}"),
+            "TestData": {},
+        }
+        self.events.append(("create-persistent-volume", name))
+        return ResourceRecord("volume", name, name)
+
+    def validate_persistent_volume(
+        self, record: ResourceRecord, ownership: Ownership
+    ) -> dict[str, Any]:
+        inspection = self.validate_owned(record, ownership)
+        Docker._validate_persistent_volume_policy(inspection)
         return inspection
 
     def create_seeder(self, **values: Any) -> ResourceRecord:
@@ -413,6 +445,33 @@ class FakeDocker:
                     consumers.add(object_id)
         return consumers
 
+    def configured_volume_consumers(self, volume: ResourceRecord) -> set[str]:
+        consumers: set[str] = set()
+        for object_id, inspection in self.objects.items():
+            if "Config" not in inspection:
+                continue
+            mounts = inspection.get("Mounts")
+            host = inspection.get("HostConfig")
+            if not isinstance(mounts, list) or not isinstance(host, dict):
+                raise IntegrityError("Docker container volume inspection is malformed")
+            configured = host.get("Mounts")
+            configured_mounts = [] if configured is None else configured
+            if not isinstance(configured_mounts, list):
+                raise IntegrityError("Docker container volume inspection is malformed")
+            if any(
+                isinstance(mount, dict)
+                and mount.get("Type") == "volume"
+                and mount.get("Name") == volume.name
+                for mount in mounts
+            ) or any(
+                isinstance(mount, dict)
+                and mount.get("Type") == "volume"
+                and mount.get("Source") == volume.name
+                for mount in configured_mounts
+            ):
+                consumers.add(object_id)
+        return consumers
+
     def inspect(self, kind: str, object_id: str) -> dict[str, Any]:
         return self.objects[object_id]
 
@@ -544,6 +603,17 @@ def runtime(paths: Paths) -> tuple[ReadyRuntime, FakeDocker, ReviewedLab]:
     return value, docker, Catalogue().get("juice-shop")
 
 
+def persistent_review(lab: ReviewedLab) -> ReviewedLab:
+    storage = dataclasses.replace(lab.manifest.ephemeral_storage, uid=0, gid=0)
+    manifest = dataclasses.replace(
+        lab.manifest,
+        ephemeral_storage=storage,
+        persistence_required=True,
+        persistence_volumes=tuple(mount.name for mount in storage.seeded + storage.empty),
+    )
+    return dataclasses.replace(lab, manifest=manifest)
+
+
 def preserve_as_previous(value: ReadyRuntime, docker: FakeDocker, lab: ReviewedLab) -> RunState:
     state = value.store.load(lab.manifest.id)
     assert state is not None
@@ -589,6 +659,217 @@ def test_reference_lifecycle_is_idempotent_and_distinct(xdg_paths: Paths) -> Non
     assert value.remove(lab).state == "absent"
     assert value.remove(lab).state == "absent"
     assert docker.objects == {}
+
+
+def test_persistent_rebuild_preserves_owned_data_and_reset_replaces_it(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, packaged = runtime(xdg_paths)
+    lab = persistent_review(packaged)
+    started = value.up(lab, host_port=18080)
+    initial = value.store.load(lab.manifest.id)
+    assert initial is not None and initial.phase == "steady"
+    initial_volumes = tuple(record for record in initial.resources if record.kind == "volume")
+    assert len(initial_volumes) == len(
+        lab.manifest.ephemeral_storage.seeded + lab.manifest.ephemeral_storage.empty
+    )
+    for record in initial_volumes:
+        docker.objects[record.object_id]["TestData"]["marker"] = record.name
+    initial_transients = {
+        record.object_id for record in initial.resources if record.kind != "volume"
+    }
+    seeder_creations = sum(event[0] == "create-seeder" for event in docker.events)
+
+    rebuilt = value.rebuild(lab)
+    after_rebuild = value.store.load(lab.manifest.id)
+    assert after_rebuild is not None and after_rebuild.phase == "steady"
+    assert rebuilt.run_id == started.run_id == after_rebuild.run_id
+    assert tuple(
+        record.object_id for record in after_rebuild.resources if record.kind == "volume"
+    ) == tuple(record.object_id for record in initial_volumes)
+    assert all(
+        docker.objects[record.object_id]["TestData"]["marker"] == record.name
+        for record in initial_volumes
+    )
+    assert initial_transients.isdisjoint(docker.objects)
+    assert sum(event[0] == "create-seeder" for event in docker.events) == seeder_creations
+
+    reset = value.reset(lab)
+    after_reset = value.store.load(lab.manifest.id)
+    assert after_reset is not None and after_reset.phase == "steady"
+    assert reset.run_id != rebuilt.run_id
+    assert all(record.object_id not in docker.objects for record in initial_volumes)
+    assert all(
+        docker.objects[record.object_id]["TestData"] == {}
+        for record in after_reset.resources
+        if record.kind == "volume"
+    )
+    assert value.remove(lab).state == "absent"
+    assert docker.objects == {}
+
+
+def test_persistent_rebuild_rejects_foreign_volume_consumer_before_mutation(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, packaged = runtime(xdg_paths)
+    lab = persistent_review(packaged)
+    value.up(lab, host_port=18080)
+    state = value.store.load(lab.manifest.id)
+    assert state is not None
+    volume = next(record for record in state.resources if record.kind == "volume")
+    foreign_id = "f" * 64
+    docker.objects[foreign_id] = {
+        "Id": foreign_id,
+        "Name": "/foreign-stopped-container",
+        "Config": {"Labels": {}, "Image": "unrelated.invalid/image@example"},
+        "HostConfig": {
+            "Mounts": [
+                {
+                    "Type": "volume",
+                    "Source": volume.name,
+                    "Target": "/data",
+                    "ReadOnly": False,
+                    "VolumeOptions": {"NoCopy": False},
+                }
+            ]
+        },
+        "Mounts": [
+            {
+                "Type": "volume",
+                "Name": volume.name,
+                "Destination": "/data",
+                "RW": True,
+            }
+        ],
+        "NetworkSettings": {"Networks": {}},
+        "State": {"Running": False, "Status": "exited"},
+    }
+    removed_before = tuple(docker.removed)
+
+    with pytest.raises(PolicyError, match="unowned container"):
+        value.rebuild(lab)
+
+    assert tuple(docker.removed) == removed_before
+    assert value.store.load(lab.manifest.id) == state
+    assert foreign_id in docker.objects
+    del docker.objects[foreign_id]
+    assert value.remove(lab).state == "absent"
+
+
+def test_failed_persistent_rebuild_retains_data_and_resumes_explicitly(
+    xdg_paths: Paths,
+) -> None:
+    value, docker, packaged = runtime(xdg_paths)
+    lab = persistent_review(packaged)
+    value.up(lab, host_port=18080)
+    initial = value.store.load(lab.manifest.id)
+    assert initial is not None
+    volumes = tuple(record for record in initial.resources if record.kind == "volume")
+    for record in volumes:
+        docker.objects[record.object_id]["TestData"]["marker"] = "preserve"
+    value.fail_health_call = value.health_calls + 1
+
+    with pytest.raises(PreflightError, match="synthetic candidate identity failure"):
+        value.rebuild(lab)
+
+    interrupted = value.store.load(lab.manifest.id)
+    assert interrupted is not None and interrupted.phase == "rebuild"
+    assert all(
+        docker.objects[record.object_id]["TestData"]["marker"] == "preserve" for record in volumes
+    )
+    with pytest.raises(PolicyError, match="interrupted persistent rebuild"):
+        value.status(lab)
+
+    value.fail_health_call = None
+    resumed = value.up(lab, host_port=18080)
+    recovered = value.store.load(lab.manifest.id)
+    assert recovered is not None and recovered.phase == "steady"
+    assert resumed.run_id == initial.run_id
+    assert all(
+        docker.objects[record.object_id]["TestData"]["marker"] == "preserve" for record in volumes
+    )
+    assert value.remove(lab).state == "absent"
+
+
+@pytest.mark.parametrize("damage", ["missing", "relabeled"])
+def test_persistent_rebuild_refuses_missing_or_relabelled_data_before_cleanup(
+    xdg_paths: Paths, damage: str
+) -> None:
+    value, docker, packaged = runtime(xdg_paths)
+    lab = persistent_review(packaged)
+    value.up(lab, host_port=18080)
+    state = value.store.load(lab.manifest.id)
+    assert state is not None
+    volume = next(record for record in state.resources if record.kind == "volume")
+    if damage == "missing":
+        del docker.objects[volume.object_id]
+    else:
+        docker.objects[volume.object_id]["Labels"][LAB] = "other-lab"
+    removed_before = tuple(docker.removed)
+
+    with pytest.raises(PolicyError):
+        value.rebuild(lab)
+
+    assert tuple(docker.removed) == removed_before
+    assert value.store.load(lab.manifest.id) == state
+
+
+def test_persistent_rebuild_adopts_exact_create_checkpoint_orphan(
+    xdg_paths: Paths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    value, docker, packaged = runtime(xdg_paths)
+    lab = persistent_review(packaged)
+    value.up(lab, host_port=18080)
+    initial = value.store.load(lab.manifest.id)
+    assert initial is not None
+    volumes = tuple(record for record in initial.resources if record.kind == "volume")
+    create_network = docker.create_network
+    interrupted = False
+
+    def create_then_interrupt(*args: Any, **kwargs: Any) -> ResourceRecord:
+        nonlocal interrupted
+        record = create_network(*args, **kwargs)
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return record
+
+    monkeypatch.setattr(docker, "create_network", create_then_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        value.rebuild(lab)
+    pending = value.store.load(lab.manifest.id)
+    assert pending is not None and pending.phase == "rebuild"
+    orphan = next(
+        object_id
+        for object_id, inspection in docker.objects.items()
+        if "Config" not in inspection and inspection.get("Driver") == "bridge"
+    )
+    assert all(record.object_id != orphan for record in pending.resources)
+
+    monkeypatch.setattr(docker, "create_network", create_network)
+    recovered = value.up(lab, host_port=18080)
+    assert recovered.run_id == initial.run_id
+    assert orphan in docker.removed
+    assert all(record.object_id in docker.objects for record in volumes)
+    assert value.remove(lab).state == "absent"
+
+
+def test_persistent_update_refuses_before_pull_or_runtime_mutation(xdg_paths: Paths) -> None:
+    value, docker, packaged = runtime(xdg_paths)
+    lab = persistent_review(packaged)
+    value.up(lab, host_port=18080)
+    previous = preserve_as_previous(value, docker, lab)
+    pulls_before = tuple(docker.pulls)
+    objects_before = set(docker.objects)
+
+    with pytest.raises(PolicyError, match="data migration policy"):
+        value.activate_reviewed_update(packaged)
+
+    assert tuple(docker.pulls) == pulls_before
+    assert set(docker.objects) == objects_before
+    assert value.store.load(lab.manifest.id) == previous
+    assert value.store.load_update(lab.manifest.id) is None
+    assert value.remove(lab).state == "absent"
 
 
 def test_reference_runtime_has_exact_bounded_storage_and_no_final_seeder(

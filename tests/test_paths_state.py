@@ -9,7 +9,7 @@ from typing import Any, cast
 import pytest
 
 from vulndockyard.errors import IntegrityError, PreflightError
-from vulndockyard.models import EphemeralStorage, Service
+from vulndockyard.models import EphemeralMount, EphemeralStorage, Service
 from vulndockyard.paths import Paths, assert_owned_path, remove_owned_tree
 from vulndockyard.state import (
     ResourceRecord,
@@ -100,6 +100,19 @@ def policy() -> RuntimePolicySnapshot:
     )
 
 
+def persistent_policy() -> RuntimePolicySnapshot:
+    return dataclasses.replace(
+        policy(),
+        ephemeral_storage=EphemeralStorage(
+            65532,
+            65532,
+            (EphemeralMount("data", "/juice-shop/data", 64),),
+            (EphemeralMount("logs", "/juice-shop/logs", 16),),
+        ),
+        persistence_required=True,
+    )
+
+
 def serialized_state() -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(json.dumps(state().serializable())))
 
@@ -116,7 +129,7 @@ def test_state_round_trip_is_atomic_and_idempotent(xdg_paths: Paths) -> None:
     assert store.load("juice-shop") is None
 
 
-def test_v3_state_and_update_journal_round_trip_atomically(xdg_paths: Paths) -> None:
+def test_v4_state_and_update_journal_round_trip_atomically(xdg_paths: Paths) -> None:
     store = StateStore(xdg_paths)
     previous = RunState.create(
         lab_id="juice-shop",
@@ -146,7 +159,10 @@ def test_v3_state_and_update_journal_round_trip_atomically(xdg_paths: Paths) -> 
         runtime_policy=policy(),
         created_at="2026-09-06T00:00:00Z",
     )
-    assert candidate.schema_version == 3
+    assert candidate.schema_version == 4
+    assert candidate.phase == "steady"
+    assert candidate.runtime_policy is not None
+    assert candidate.runtime_policy.persistence_required is False
     journal = UpdateJournal(
         1,
         "juice-shop",
@@ -171,6 +187,7 @@ def test_runtime_policy_snapshot_and_update_journal_fail_closed() -> None:
         "pids": 256,
         "read_only_root": True,
         "outbound_required": False,
+        "persistence_required": False,
         "ephemeral_storage": {"uid": 65532, "gid": 65532, "seeded": [], "empty": []},
         "friendly_hostname": "juice-shop.test",
         "health_timeout_seconds": 120,
@@ -189,6 +206,7 @@ def test_runtime_policy_snapshot_and_update_journal_fail_closed() -> None:
         ("memory_mb", True),
         ("read_only_root", False),
         ("outbound_required", "no"),
+        ("persistence_required", "no"),
         ("friendly_hostname", "localhost"),
         ("health_timeout_seconds", True),
     ):
@@ -241,6 +259,169 @@ def test_runtime_policy_snapshot_and_update_journal_fail_closed() -> None:
     )
     with pytest.raises(IntegrityError, match="health services differ"):
         RunState.parse(json.loads(json.dumps(mismatched_gateway.serializable())))
+
+
+def test_legacy_state_versions_round_trip_without_v4_fields() -> None:
+    legacy_v1 = state()
+    assert legacy_v1.schema_version == 1
+    assert legacy_v1.phase == "steady"
+    assert "phase" not in legacy_v1.serializable()
+    assert RunState.parse(json.loads(json.dumps(legacy_v1.serializable()))) == legacy_v1
+
+    legacy_v2 = RunState.create(
+        lab_id="juice-shop",
+        run_id="a" * 32,
+        manifest_identity="b" * 64,
+        host_port=80,
+        trusted=True,
+        requested_reference="registry.example.test/app@sha256:" + "c" * 64,
+        resolved_digest="sha256:" + "c" * 64,
+        resources=(),
+        gateway_reference="registry.example.test/gateway@sha256:" + "3" * 64,
+        upstream_port=3000,
+        created_at="2026-09-06T00:00:00Z",
+    )
+    assert legacy_v2.schema_version == 2
+    assert "phase" not in legacy_v2.serializable()
+    assert RunState.parse(json.loads(json.dumps(legacy_v2.serializable()))) == legacy_v2
+
+    current = RunState.create(
+        lab_id="juice-shop",
+        run_id="a" * 32,
+        manifest_identity="b" * 64,
+        host_port=80,
+        trusted=True,
+        requested_reference="registry.example.test/app@sha256:" + "c" * 64,
+        resolved_digest="sha256:" + "c" * 64,
+        resources=(),
+        gateway_reference="registry.example.test/gateway@sha256:" + "3" * 64,
+        upstream_port=3000,
+        runtime_policy=policy(),
+        created_at="2026-09-06T00:00:00Z",
+    )
+    legacy_v3 = dataclasses.replace(current, schema_version=3)
+    serialized_v3 = legacy_v3.serializable()
+    assert "phase" not in serialized_v3
+    assert "persistence_required" not in serialized_v3["runtime_policy"]
+    parsed_v3 = RunState.parse(json.loads(json.dumps(serialized_v3)))
+    assert parsed_v3 == legacy_v3
+    assert parsed_v3.runtime_policy is not None
+    assert parsed_v3.runtime_policy.persistence_required is False
+
+
+def test_rebuild_phase_requires_a_complete_persistent_snapshot() -> None:
+    rebuild_policy = persistent_policy()
+    rebuilding = RunState.create(
+        lab_id="juice-shop",
+        run_id="a" * 32,
+        manifest_identity="b" * 64,
+        host_port=80,
+        trusted=True,
+        requested_reference="registry.example.test/app@sha256:" + "c" * 64,
+        resolved_digest="sha256:" + "c" * 64,
+        resources=(
+            ResourceRecord(
+                "volume",
+                "vdy-juice-shop-aaaaaaaaaaaa-volume-data",
+                "vdy-juice-shop-aaaaaaaaaaaa-volume-data",
+            ),
+            ResourceRecord(
+                "volume",
+                "vdy-juice-shop-aaaaaaaaaaaa-volume-logs",
+                "vdy-juice-shop-aaaaaaaaaaaa-volume-logs",
+            ),
+        ),
+        gateway_reference="registry.example.test/gateway@sha256:" + "3" * 64,
+        upstream_port=3000,
+        runtime_policy=rebuild_policy,
+        created_at="2026-09-06T00:00:00Z",
+        phase="rebuild",
+    )
+    assert RunState.parse(json.loads(json.dumps(rebuilding.serializable()))) == rebuilding
+
+    with pytest.raises(ValueError, match="complete persistent runtime snapshot"):
+        RunState.create(
+            lab_id="juice-shop",
+            run_id="a" * 32,
+            manifest_identity="b" * 64,
+            host_port=80,
+            trusted=True,
+            requested_reference="registry.example.test/app@sha256:" + "c" * 64,
+            resolved_digest="sha256:" + "c" * 64,
+            resources=(),
+            gateway_reference="registry.example.test/gateway@sha256:" + "3" * 64,
+            upstream_port=3000,
+            runtime_policy=policy(),
+            phase="rebuild",
+        )
+
+    invalid = json.loads(json.dumps(rebuilding.serializable()))
+    invalid["runtime_policy"]["persistence_required"] = False
+    with pytest.raises(IntegrityError, match="complete persistent runtime snapshot"):
+        RunState.parse(invalid)
+
+    missing_volume = json.loads(json.dumps(rebuilding.serializable()))
+    missing_volume["resources"].pop()
+    with pytest.raises(IntegrityError, match="every deterministic persistent volume"):
+        RunState.parse(missing_volume)
+
+    unexpected_volume = json.loads(json.dumps(rebuilding.serializable()))
+    unexpected_volume["resources"].append(
+        {
+            "kind": "volume",
+            "name": "vdy-juice-shop-aaaaaaaaaaaa-volume-unknown",
+            "object_id": "vdy-juice-shop-aaaaaaaaaaaa-volume-unknown",
+        }
+    )
+    with pytest.raises(IntegrityError, match="every deterministic persistent volume"):
+        RunState.parse(unexpected_volume)
+
+
+def test_update_journal_rejects_nonsteady_run_states() -> None:
+    rebuild_policy = persistent_policy()
+    previous = RunState.create(
+        lab_id="juice-shop",
+        run_id="a" * 32,
+        manifest_identity="b" * 64,
+        host_port=80,
+        trusted=True,
+        requested_reference="registry.example.test/app@sha256:" + "c" * 64,
+        resolved_digest="sha256:" + "c" * 64,
+        resources=(
+            ResourceRecord(
+                "volume",
+                "vdy-juice-shop-aaaaaaaaaaaa-volume-data",
+                "vdy-juice-shop-aaaaaaaaaaaa-volume-data",
+            ),
+            ResourceRecord(
+                "volume",
+                "vdy-juice-shop-aaaaaaaaaaaa-volume-logs",
+                "vdy-juice-shop-aaaaaaaaaaaa-volume-logs",
+            ),
+        ),
+        gateway_reference="registry.example.test/gateway@sha256:" + "3" * 64,
+        upstream_port=3000,
+        runtime_policy=rebuild_policy,
+        phase="rebuild",
+    )
+    candidate = dataclasses.replace(
+        previous,
+        run_id="d" * 32,
+        manifest_identity="e" * 64,
+        host_port=28080,
+        phase="steady",
+    )
+    journal = UpdateJournal(
+        1,
+        "juice-shop",
+        "staged",
+        previous,
+        candidate,
+        ("application", "gateway"),
+        28080,
+    )
+    with pytest.raises(IntegrityError, match="requires steady run states"):
+        UpdateJournal.parse(json.loads(json.dumps(journal.serializable())))
 
 
 def test_state_fails_closed_on_unknown_data_and_symlink(xdg_paths: Paths, tmp_path: Path) -> None:

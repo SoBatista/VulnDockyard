@@ -564,6 +564,43 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "adapter_status": {
+            "const": "runnable"
+          },
+          "persistence": {
+            "properties": {
+              "required": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "ephemeral_storage": {
+            "properties": {
+              "uid": {
+                "const": 0
+              },
+              "gid": {
+                "const": 0
+              }
+            }
+          },
+          "persistence": {
+            "properties": {
+              "volumes": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      }
     }
   ]
 }

@@ -349,6 +349,8 @@ class Manifest:
     images: tuple[Image, ...]
     services: tuple[Service, ...]
     ephemeral_storage: EphemeralStorage
+    persistence_required: bool
+    persistence_volumes: tuple[str, ...]
     friendly_hostname: str
     outbound_required: bool
     status_reason: str
@@ -527,17 +529,22 @@ class Manifest:
         if len(persistence_volumes) != len(set(persistence_volumes)):
             raise IntegrityError("persistence.volumes must be unique")
         if status is AdapterStatus.RUNNABLE:
-            if persistence["required"]:
-                raise IntegrityError(
-                    "persistent runnable adapters require an implemented reviewed volume lifecycle"
-                )
             scratch_names = {
                 mount.name for mount in ephemeral_storage.seeded + ephemeral_storage.empty
             }
             if set(persistence_volumes) != scratch_names:
                 raise IntegrityError(
-                    "runnable persistence.volumes must exactly identify owned ephemeral storage"
+                    "runnable persistence.volumes must exactly identify declared writable storage"
                 )
+            if persistence["required"]:
+                if not scratch_names:
+                    raise IntegrityError(
+                        "persistent runnable adapters require at least one declared writable mount"
+                    )
+                if (ephemeral_storage.uid, ephemeral_storage.gid) != (0, 0):
+                    raise IntegrityError(
+                        "persistent runnable adapters currently require storage uid and gid 0"
+                    )
 
         verification = _mapping(data["verification"], "verification")
         _require_exact(verification, {"status", "platforms", "evidence"}, "verification")
@@ -579,6 +586,8 @@ class Manifest:
             images=images,
             services=services,
             ephemeral_storage=ephemeral_storage,
+            persistence_required=persistence["required"],
+            persistence_volumes=persistence_volumes,
             friendly_hostname=hostname,
             outbound_required=outbound["required"],
             status_reason=status_reason,

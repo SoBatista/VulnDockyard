@@ -170,6 +170,17 @@ def test_json_destructive_command_is_one_document(
         "all eight owned ephemeral data volumes",
         "server-side accounts, progress, uploads, logs, and generated state",
     ]
+    assert document["data"]["preview"]["owned_volume_names"] == [
+        "data",
+        "ftp",
+        "frontend",
+        "csaf",
+        "i18n",
+        "logs",
+        "uploads-complaints",
+        "tmp",
+    ]
+    assert document["data"]["preview"]["persistent_data_deleted"] is False
     assert document["data"]["status"]["lock_match"] is True
 
 

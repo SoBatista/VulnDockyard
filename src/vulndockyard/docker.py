@@ -525,7 +525,7 @@ class Docker:
             args.extend(
                 (
                     "--mount",
-                    f"type=volume,src={volume.name},dst={mount.container_path}",
+                    (f"type=volume,src={volume.name},dst={mount.container_path},volume-nocopy"),
                 )
             )
         for mount in empty_mounts:
@@ -644,6 +644,38 @@ class Docker:
         expected_volumes = {
             (volume.name, mount.container_path, True) for volume, mount in seeded_mounts
         }
+        expected_configured_volumes = {
+            (volume.name, mount.container_path, True) for volume, mount in seeded_mounts
+        }
+        raw_configured_mounts = host.get("Mounts")
+        configured_mounts = [] if raw_configured_mounts is None else raw_configured_mounts
+        if not isinstance(configured_mounts, list):
+            raise IntegrityError("Docker application configured mounts are malformed")
+        actual_configured_volumes: set[tuple[str, str, bool]] = set()
+        for mount in configured_mounts:
+            if not isinstance(mount, dict):
+                raise IntegrityError("Docker application configured mount is malformed")
+            source = mount.get("Source")
+            target = mount.get("Target")
+            if (
+                mount.get("Type") != "volume"
+                or not isinstance(source, str)
+                or not isinstance(target, str)
+            ):
+                raise PolicyError("Docker application has an unreviewed configured mount")
+            if mount.get("ReadOnly") is not False:
+                raise PolicyError(
+                    "Docker application named volume is not configured exactly writable"
+                )
+            volume_options = mount.get("VolumeOptions")
+            if volume_options != {"NoCopy": True}:
+                raise PolicyError("Docker application named volume lacks exact volume-nocopy")
+            actual_configured_volumes.add((source, target, True))
+        if (
+            len(actual_configured_volumes) != len(configured_mounts)
+            or actual_configured_volumes != expected_configured_volumes
+        ):
+            raise PolicyError("Docker application configured mount inventory differs")
         expected_tmpfs_mounts = {(mount.container_path, True) for mount in empty_mounts}
         actual_volumes: set[tuple[str, str, bool]] = set()
         actual_tmpfs_mounts: set[tuple[str, bool]] = set()
@@ -767,6 +799,45 @@ class Docker:
             self.remove(record)
             raise
         return record
+
+    def create_persistent_volume(
+        self,
+        *,
+        name: str,
+        ownership: Ownership,
+    ) -> ResourceRecord:
+        record = ResourceRecord("volume", name, name)
+        role = expected_resource_role(record, ownership)
+        args = ["volume", "create", "--driver", "local"]
+        args.extend(ownership.labels(role))
+        args.append(name)
+        result = self._run(tuple(args), timeout=self.timeouts.start)
+        if result.stdout.strip() != name:
+            raise IntegrityError("Docker returned an unexpected volume identity")
+        inspection = self.validate_owned(record, ownership)
+        try:
+            self._validate_persistent_volume_policy(inspection)
+        except (IntegrityError, PolicyError):
+            self.remove(record)
+            raise
+        return record
+
+    @staticmethod
+    def _validate_persistent_volume_policy(inspection: dict[str, Any]) -> None:
+        if inspection.get("Driver") != "local" or inspection.get("Scope") != "local":
+            raise PolicyError("persistent volume does not use Docker's local scope and driver")
+        options = inspection.get("Options")
+        if options is not None and not isinstance(options, dict):
+            raise IntegrityError("persistent volume options are malformed")
+        if options:
+            raise PolicyError("persistent volume has unexpected driver options")
+
+    def validate_persistent_volume(
+        self, record: ResourceRecord, ownership: Ownership
+    ) -> dict[str, Any]:
+        inspection = self.validate_owned(record, ownership)
+        self._validate_persistent_volume_policy(inspection)
+        return inspection
 
     @staticmethod
     def _validate_ephemeral_volume_policy(
@@ -1288,6 +1359,72 @@ class Docker:
                 ):
                     raise IntegrityError("Docker container network attachment is malformed")
                 if attached_id == network.object_id or (not attached_id and name == network.name):
+                    consumers.add(object_id)
+        return consumers
+
+    def configured_volume_consumers(self, volume: ResourceRecord) -> set[str]:
+        """Return all containers configured to consume an exact named volume."""
+        if (
+            volume.kind != "volume"
+            or not RESOURCE_NAME.fullmatch(volume.name)
+            or volume.object_id != volume.name
+        ):
+            raise IntegrityError("recorded Docker volume identity is malformed")
+        response = self._run(
+            ("container", "ls", "--all", "--no-trunc", "--quiet"),
+            timeout=self.timeouts.inspect,
+        )
+        container_ids = tuple(line for line in response.stdout.splitlines() if line)
+        if len(set(container_ids)) != len(container_ids) or any(
+            not OBJECT_ID.fullmatch(object_id) for object_id in container_ids
+        ):
+            raise IntegrityError("Docker returned malformed container inventory")
+        consumers: set[str] = set()
+        for object_id in container_ids:
+            inspection = self.inspect("container", object_id)
+            if inspection.get("Id") != object_id:
+                raise IntegrityError(
+                    "Docker container inventory identity changed during inspection"
+                )
+            mounts = inspection.get("Mounts")
+            host = inspection.get("HostConfig")
+            if not isinstance(host, dict):
+                raise IntegrityError("Docker container volume inspection is malformed")
+            configured = host.get("Mounts")
+            configured_mounts = [] if configured is None else configured
+            configured_binds = host.get("Binds")
+            binds = [] if configured_binds is None else configured_binds
+            if (
+                not isinstance(mounts, list)
+                or not isinstance(configured_mounts, list)
+                or not isinstance(binds, list)
+            ):
+                raise IntegrityError("Docker container volume inspection is malformed")
+            for mount in mounts:
+                if not isinstance(mount, dict) or not isinstance(mount.get("Type"), str):
+                    raise IntegrityError("Docker container volume attachment is malformed")
+                if mount["Type"] != "volume":
+                    continue
+                name = mount.get("Name")
+                if not isinstance(name, str) or not RESOURCE_NAME.fullmatch(name):
+                    raise IntegrityError("Docker container volume attachment is malformed")
+                if name == volume.name:
+                    consumers.add(object_id)
+            for mount in configured_mounts:
+                if not isinstance(mount, dict) or not isinstance(mount.get("Type"), str):
+                    raise IntegrityError("Docker container configured mount is malformed")
+                if mount["Type"] != "volume":
+                    continue
+                source = mount.get("Source")
+                if not isinstance(source, str) or not RESOURCE_NAME.fullmatch(source):
+                    raise IntegrityError("Docker container configured volume is malformed")
+                if source == volume.name:
+                    consumers.add(object_id)
+            for bind in binds:
+                if not isinstance(bind, str) or not bind:
+                    raise IntegrityError("Docker container configured volume bind is malformed")
+                source, separator, _remainder = bind.partition(":")
+                if separator and source == volume.name:
                     consumers.add(object_id)
         return consumers
 

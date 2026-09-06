@@ -41,9 +41,10 @@ class RuntimePolicySnapshot:
     friendly_hostname: str
     health_timeout_seconds: int
     services: tuple[Service, ...]
+    persistence_required: bool = False
 
     @classmethod
-    def parse(cls, value: object) -> RuntimePolicySnapshot:
+    def parse(cls, value: object, *, legacy: bool = False) -> RuntimePolicySnapshot:
         if not isinstance(value, dict):
             raise IntegrityError("runtime policy snapshot must be an object")
         data = cast(dict[str, Any], value)
@@ -58,6 +59,8 @@ class RuntimePolicySnapshot:
             "health_timeout_seconds",
             "services",
         }
+        if not legacy:
+            keys.add("persistence_required")
         if data.keys() != keys:
             raise IntegrityError("runtime policy snapshot contains missing or unknown fields")
         memory = data["memory_mb"]
@@ -79,6 +82,9 @@ class RuntimePolicySnapshot:
             raise IntegrityError("runtime policy snapshot must require a read-only root")
         if not isinstance(data["outbound_required"], bool):
             raise IntegrityError("runtime policy snapshot outbound marker is invalid")
+        persistence_required = False if legacy else data["persistence_required"]
+        if not isinstance(persistence_required, bool):
+            raise IntegrityError("runtime policy snapshot persistence marker is invalid")
         hostname = data["friendly_hostname"]
         timeout = data["health_timeout_seconds"]
         raw_services = data["services"]
@@ -112,7 +118,14 @@ class RuntimePolicySnapshot:
             hostname,
             timeout,
             services,
+            persistence_required,
         )
+
+
+def _persistent_volume_names(lab_id: str, run_id: str, policy: RuntimePolicySnapshot) -> set[str]:
+    prefix = f"vdy-{lab_id}-{run_id[:12]}-volume-"
+    mounts = policy.ephemeral_storage.seeded + policy.ephemeral_storage.empty
+    return {f"{prefix}{mount.name}" for mount in mounts}
 
 
 @dataclass(frozen=True)
@@ -131,6 +144,7 @@ class RunState:
     gateway_reference: str | None
     upstream_port: int | None
     runtime_policy: RuntimePolicySnapshot | None
+    phase: str = "steady"
 
     @classmethod
     def create(
@@ -148,13 +162,27 @@ class RunState:
         upstream_port: int | None = None,
         runtime_policy: RuntimePolicySnapshot | None = None,
         created_at: str | None = None,
+        phase: str = "steady",
     ) -> RunState:
         if (gateway_reference is None) != (upstream_port is None):
             raise ValueError("gateway reference and upstream port must be recorded together")
         if runtime_policy is not None and gateway_reference is None:
             raise ValueError("runtime policy requires a complete gateway snapshot")
+        if phase not in {"steady", "rebuild"}:
+            raise ValueError("run state phase must be steady or rebuild")
+        if phase == "rebuild" and (
+            runtime_policy is None or not runtime_policy.persistence_required
+        ):
+            raise ValueError("rebuild phase requires a complete persistent runtime snapshot")
+        if phase == "rebuild" and runtime_policy is not None:
+            expected_volumes = _persistent_volume_names(lab_id, run_id, runtime_policy)
+            recorded_volumes = {
+                resource.name for resource in resources if resource.kind == "volume"
+            }
+            if not expected_volumes or recorded_volumes != expected_volumes:
+                raise ValueError("rebuild phase requires every deterministic persistent volume")
         return cls(
-            3 if runtime_policy is not None else 2 if gateway_reference is not None else 1,
+            4 if runtime_policy is not None else 2 if gateway_reference is not None else 1,
             lab_id,
             run_id,
             manifest_identity,
@@ -169,6 +197,7 @@ class RunState:
             gateway_reference,
             upstream_port,
             runtime_policy,
+            phase,
         )
 
     @classmethod
@@ -192,8 +221,11 @@ class RunState:
         schema_version = data.get("schema_version")
         v2_keys = common_keys | {"gateway_reference", "upstream_port"}
         v3_keys = v2_keys | {"runtime_policy"}
+        v4_keys = v3_keys | {"phase"}
         keys_valid = (
-            data.keys() == v3_keys
+            data.keys() == v4_keys
+            if schema_version == 4
+            else data.keys() == v3_keys
             if schema_version == 3
             else data.keys() == v2_keys
             if schema_version == 2
@@ -201,7 +233,7 @@ class RunState:
         )
         if not keys_valid:
             raise IntegrityError("run state contains missing or unknown fields")
-        if schema_version not in {1, 2, 3} or data["manifest_version"] != 1:
+        if schema_version not in {1, 2, 3, 4} or data["manifest_version"] != 1:
             raise IntegrityError("unsupported run state version")
         if (
             not isinstance(data["host_port"], int)
@@ -245,7 +277,7 @@ class RunState:
             and (data["gateway_reference"] is not None or data["upstream_port"] is not None)
         ):
             raise IntegrityError("legacy run state contains invalid rollback fields")
-        if schema_version in {2, 3}:
+        if schema_version in {2, 3, 4}:
             gateway_reference = data["gateway_reference"]
             upstream_port = data["upstream_port"]
             if not isinstance(gateway_reference, str) or "@" not in gateway_reference:
@@ -260,12 +292,25 @@ class RunState:
             ):
                 raise IntegrityError("run state upstream port is invalid")
         runtime_policy: RuntimePolicySnapshot | None = None
-        if schema_version == 3:
-            runtime_policy = RuntimePolicySnapshot.parse(data["runtime_policy"])
+        phase = "steady"
+        if schema_version in {3, 4}:
+            runtime_policy = RuntimePolicySnapshot.parse(
+                data["runtime_policy"], legacy=schema_version == 3
+            )
             if upstream_port is None or any(
                 service.internal_port != upstream_port for service in runtime_policy.services
             ):
                 raise IntegrityError("run state health services differ from its gateway snapshot")
+        if schema_version == 4:
+            phase = data["phase"]
+            if phase not in {"steady", "rebuild"}:
+                raise IntegrityError("run state phase is invalid")
+            if phase == "rebuild" and (
+                runtime_policy is None or not runtime_policy.persistence_required
+            ):
+                raise IntegrityError(
+                    "rebuild phase requires a complete persistent runtime snapshot"
+                )
         if UTC_TIMESTAMP.fullmatch(data["created_at"]) is None:
             raise IntegrityError("run state creation timestamp is invalid")
         try:
@@ -301,6 +346,15 @@ class RunState:
             set(resource_names)
         ):
             raise IntegrityError("run state contains duplicate resources")
+        if phase == "rebuild" and runtime_policy is not None:
+            expected_volumes = _persistent_volume_names(
+                data["lab_id"], data["run_id"], runtime_policy
+            )
+            recorded_volumes = {
+                resource.name for resource in resources if resource.kind == "volume"
+            }
+            if not expected_volumes or recorded_volumes != expected_volumes:
+                raise IntegrityError("rebuild phase requires every deterministic persistent volume")
         return cls(
             schema_version,
             data["lab_id"],
@@ -316,6 +370,7 @@ class RunState:
             gateway_reference,
             upstream_port,
             runtime_policy,
+            phase,
         )
 
     def serializable(self) -> dict[str, Any]:
@@ -324,8 +379,15 @@ class RunState:
             value.pop("gateway_reference")
             value.pop("upstream_port")
             value.pop("runtime_policy")
+            value.pop("phase")
         elif self.schema_version == 2:
             value.pop("runtime_policy")
+            value.pop("phase")
+        elif self.schema_version == 3:
+            value.pop("phase")
+            runtime_policy = value["runtime_policy"]
+            if isinstance(runtime_policy, dict):
+                runtime_policy.pop("persistence_required", None)
         return value
 
 
@@ -380,6 +442,8 @@ class UpdateJournal:
             or candidate.runtime_policy is None
         ):
             raise IntegrityError("update journal lacks a trusted rollback snapshot")
+        if previous.phase != "steady" or candidate.phase != "steady":
+            raise IntegrityError("update journal requires steady run states")
         if phase not in {"staged", "cutover", "ready"}:
             raise IntegrityError("update journal phase is invalid")
         if (
