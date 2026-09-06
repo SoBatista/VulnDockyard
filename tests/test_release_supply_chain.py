@@ -12,6 +12,7 @@ from scripts import secret_scan
 from scripts.check_repository import _dependency_lock_failures
 from scripts.check_version import check as check_version
 from scripts.check_version import check_release_ready
+from scripts.check_version import _projection_state
 from scripts.check_workflows import check as check_workflows
 from scripts.generate_sbom import generate
 from scripts.release import _expected_artifacts, _release_metadata, _verify_sums
@@ -29,6 +30,42 @@ def test_every_canonical_version_projection_is_consistent() -> None:
 def test_unreleased_target_cannot_enter_publication_workflow() -> None:
     with pytest.raises(RuntimeError, match="unreleased target, not publication-ready"):
         check_release_ready()
+
+
+def test_released_projection_rejects_unreleased_target_markers() -> None:
+    version = "1.2.3"
+    readme = (
+        "https://img.shields.io/badge/version-1.2.3-blue\n"
+        "Version: `1.2.3`\n"
+        "Target version: `1.2.3` (unreleased; release gates incomplete).\n"
+    )
+    changelog = (
+        "## [Unreleased]\n\n"
+        "Target release: 1.2.3 (not yet released).\n\n"
+        "## [1.2.3] - 2026-09-06\n\n"
+        "[Unreleased]: https://github.com/SoBatista/VulnDockyard/compare/v1.2.3...HEAD\n"
+        "[1.2.3]: https://github.com/SoBatista/VulnDockyard/releases/tag/v1.2.3\n"
+    )
+
+    with pytest.raises(RuntimeError, match="consistently describe"):
+        _projection_state(version, readme, changelog)
+
+
+def test_target_projection_rejects_released_markers() -> None:
+    version = "1.2.3"
+    readme = (
+        "https://img.shields.io/badge/target--version-1.2.3-orange\n"
+        "Target version: `1.2.3` (unreleased; release gates incomplete).\n"
+        "Version: `1.2.3`\n"
+    )
+    changelog = (
+        "## [Unreleased]\n\n"
+        "Target release: 1.2.3 (not yet released).\n\n"
+        "[Unreleased]: https://github.com/SoBatista/VulnDockyard/commits/main\n"
+    )
+
+    with pytest.raises(RuntimeError, match="consistently describe"):
+        _projection_state(version, readme, changelog)
 
 
 def test_release_shaped_local_build_uses_reviewed_target_notes() -> None:

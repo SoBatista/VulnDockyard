@@ -25,33 +25,47 @@ def authoritative_version() -> str:
 
 
 def _projection_state(version: str, readme: str, changelog: str) -> str:
-    target_readme = (
-        f"target--version-{version}-orange" in readme
-        and f"Target version: `{version}` (unreleased; release gates incomplete)." in readme
-    )
-    released_readme = f"version-{version}-blue" in readme and f"Version: `{version}`" in readme
-    target_changelog = (
-        f"Target release: {version} (not yet released)." in changelog
-        and f"## [{version}]" not in changelog
-        and changelog.count("[Unreleased]: https://github.com/SoBatista/VulnDockyard/commits/main")
-        == 1
-        and f"[{version}]:" not in changelog
-    )
+    target_badge = f"target--version-{version}-orange"
+    target_declaration = f"Target version: `{version}` (unreleased; release gates incomplete)."
+    released_badge = f"version-{version}-blue"
+    released_declaration = f"Version: `{version}`"
+    target_changelog_declaration = f"Target release: {version} (not yet released)."
+    unreleased_target_link = "[Unreleased]: https://github.com/SoBatista/VulnDockyard/commits/main"
     release_heading = re.search(
         rf"^## \[{re.escape(version)}\] - (?P<date>\d{{4}}-\d{{2}}-\d{{2}})$",
         changelog,
         flags=re.MULTILINE,
     )
-    released_changelog = release_heading is not None and all(
+    released_links = all(
         changelog.count(expected) == 1
         for expected in (
             f"[Unreleased]: https://github.com/SoBatista/VulnDockyard/compare/v{version}...HEAD",
             f"[{version}]: https://github.com/SoBatista/VulnDockyard/releases/tag/v{version}",
         )
     )
-    if target_readme and target_changelog and not released_readme:
+    target_state = (
+        readme.count(target_badge) == 1
+        and readme.count(target_declaration) == 1
+        and released_badge not in readme
+        and released_declaration not in readme
+        and changelog.count(target_changelog_declaration) == 1
+        and release_heading is None
+        and changelog.count(unreleased_target_link) == 1
+        and f"[{version}]:" not in changelog
+    )
+    released_state = (
+        readme.count(released_badge) == 1
+        and readme.count(released_declaration) == 1
+        and target_badge not in readme
+        and target_declaration not in readme
+        and target_changelog_declaration not in changelog
+        and unreleased_target_link not in changelog
+        and release_heading is not None
+        and released_links
+    )
+    if target_state:
         return "target"
-    if released_readme and released_changelog and not target_readme:
+    if released_state:
         assert release_heading is not None
         try:
             date.fromisoformat(release_heading.group("date"))
@@ -76,6 +90,9 @@ def check() -> str:
         failures.append("package metadata does not project the authoritative source")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    release_documentation = (ROOT / "docs" / "release.md").read_text(encoding="utf-8")
+    if f"vulndockyard-{version}-py3-none-any.whl" not in release_documentation:
+        failures.append("release documentation does not project the authoritative version")
     if changelog.count("## [Unreleased]") != 1:
         failures.append("changelog must contain exactly one Unreleased section")
     projection_state = ""
