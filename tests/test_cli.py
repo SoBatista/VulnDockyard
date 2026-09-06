@@ -286,6 +286,30 @@ def test_update_check_and_noop_apply(
     assert "already-current" in capsys.readouterr().out
 
 
+def test_update_activation_requires_exactly_one_lab(
+    isolated_cli: type[FakeRuntime], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["update"]) == 2
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "update activation requires one LAB" in captured.err
+
+
+def test_update_check_without_lab_remains_read_only_catalogue_discovery(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "check_latest",
+        lambda lab: UpdateCheck(lab.manifest.id, "v20.2.0", "v20.2.0", False),
+    )
+
+    assert cli.main(["update", "--check"]) == 0
+    assert "juice-shop: v20.2.0 -> v20.2.0 (current)" in capsys.readouterr().out
+
+
 def test_update_refuses_discovery_without_an_installed_reviewed_candidate(
     isolated_cli: type[FakeRuntime],
     monkeypatch: pytest.MonkeyPatch,

@@ -595,6 +595,10 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
             command, _status_data(status), f"Verified: {status.url} ({status.resolved_digest})"
         )
     elif command == "update":
+        if not args.check and args.lab is None:
+            raise argparse.ArgumentError(
+                None, "update activation requires one LAB; omit LAB only with --check"
+            )
         labs = (
             (catalogue.get(args.lab),)
             if args.lab

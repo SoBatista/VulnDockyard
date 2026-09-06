@@ -25,7 +25,7 @@ normal output excludes spoilers and flags. Stable exits are: 0 success, 2 usage,
 | `remove LAB --yes` | Remove owned runtime resources; retain images. |
 | `purge LAB --images --yes` | Remove owned state and optionally exact known digests. |
 | `update --check [LAB]` | Read-only stable release discovery. |
-| `update [LAB]` | Transactionally activate an installed reviewed candidate; refuse discovery-only versions. |
+| `update LAB` | Transactionally activate one installed reviewed candidate; refuse discovery-only versions and a missing LAB. |
 | `hosts add/remove [LAB]` | Preview and atomically edit only the managed block through the verified helper. |
 | `hosts helper` | Show the packaged helper path, release checksum, fixed target, owner, and mode. |
 | `provider sync/status vulhub` | Verify/cache or report pinned official metadata. |

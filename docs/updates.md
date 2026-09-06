@@ -4,7 +4,9 @@
 release endpoint and reports SemVer changes. It does not pull, edit locks, rebuild,
 or activate. Proxy use and redirects are disabled, and the destination is derived
 only from a reviewed canonical GitHub repository. A tag never becomes an execution
-reference.
+reference. Omitting `LAB` checks all runnable catalogue entries. Mutating
+`update LAB` requires exactly one lab so failure cannot leave a partially applied
+catalogue-wide batch.
 
 The review pipeline is deliberately separated:
 
