@@ -34,15 +34,30 @@ def _managed_block(hostnames: tuple[str, ...], *, inserted_separator: bool = Fal
 def _bounds(content: bytes) -> tuple[int, int] | None:
     begin = BEGIN.encode()
     end = END.encode()
-    if content.count(begin) != content.count(end):
+
+    def exact_marker(marker: bytes) -> int | None:
+        token = marker.rstrip(b"\n")
+        count = content.count(token)
+        if count > 1:
+            raise IntegrityError("hosts file contains multiple VulnDockyard blocks")
+        if count == 0:
+            return None
+        position = content.index(token)
+        if (position != 0 and content[position - 1 : position] != b"\n") or content[
+            position : position + len(marker)
+        ] != marker:
+            raise IntegrityError("hosts file contains an inexact VulnDockyard marker")
+        return position
+
+    start = exact_marker(begin)
+    end_start = exact_marker(end)
+    if (start is None) != (end_start is None):
         raise IntegrityError("hosts file contains an incomplete VulnDockyard block")
-    if content.count(begin) > 1:
-        raise IntegrityError("hosts file contains multiple VulnDockyard blocks")
-    if begin not in content:
+    if start is None or end_start is None:
         return None
-    start = content.index(begin)
-    finish = content.index(end, start) + len(end)
-    return start, finish
+    if end_start <= start:
+        raise IntegrityError("hosts file contains misordered VulnDockyard markers")
+    return start, end_start + len(end)
 
 
 def parse_managed_hosts(content: bytes) -> tuple[str, ...]:
@@ -103,10 +118,9 @@ class HostsManager:
     def __init__(self, path: Path = Path("/etc/hosts")) -> None:
         self.path = path
 
-    def _validate(self) -> os.stat_result:
-        if self.path.is_symlink():
+    def _validate(self, info: os.stat_result) -> None:
+        if stat.S_ISLNK(info.st_mode):
             raise PolicyError(f"refusing symlinked hosts file: {self.path}")
-        info = self.path.stat()
         if not stat.S_ISREG(info.st_mode):
             raise PolicyError("hosts path is not a regular file")
         if info.st_uid != 0 and self.path == Path("/etc/hosts"):
@@ -115,17 +129,39 @@ class HostsManager:
             raise PolicyError("hosts file is group- or world-writable")
         if info.st_size > 2_000_000:
             raise PolicyError("hosts file exceeds the 2 MB safety bound")
-        return info
 
-    def _read(self) -> bytes:
-        content = self.path.read_bytes()
+    def _snapshot(self) -> tuple[os.stat_result, bytes]:
+        info = self.path.lstat()
+        self._validate(info)
+        descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                raise PolicyError("hosts file changed during validation")
+            self._validate(opened)
+            chunks: list[bytes] = []
+            remaining = 2_000_001
+            while remaining:
+                chunk = os.read(descriptor, min(65_536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            content = b"".join(chunks)
+        finally:
+            os.close(descriptor)
         if len(content) > 2_000_000 or b"\x00" in content:
             raise IntegrityError("hosts file is too large or contains a NUL byte")
-        return content
+        return info, content
+
+    def _require_unchanged(self, expected: os.stat_result) -> None:
+        current = self.path.lstat()
+        self._validate(current)
+        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+            raise PolicyError("hosts file changed before atomic replacement")
 
     def preview(self, hostname: str, *, add: bool) -> HostsPreview:
-        self._validate()
-        content = self._read()
+        _, content = self._snapshot()
         before = parse_managed_hosts(content)
         values = set(before)
         values.add(hostname) if add else values.discard(hostname)
@@ -133,8 +169,7 @@ class HostsManager:
         return HostsPreview(before, after, before != after)
 
     def apply(self, hostname: str, *, add: bool) -> HostsPreview:
-        info = self._validate()
-        content = self._read()
+        info, content = self._snapshot()
         before = parse_managed_hosts(content)
         values = set(before)
         values.add(hostname) if add else values.discard(hostname)
@@ -157,6 +192,7 @@ class HostsManager:
                     raise
             if parse_managed_hosts(Path(temporary).read_bytes()) != after:
                 raise IntegrityError("temporary hosts replacement failed validation")
+            self._require_unchanged(info)
             os.replace(temporary, self.path)
             directory_fd = os.open(directory, os.O_RDONLY)
             try:

@@ -38,10 +38,18 @@ class Paths:
 
     def ensure(self) -> None:
         for path in (self.cache, self.state, self.config, self.data):
-            if path.is_symlink():
-                raise IntegrityError(f"refusing symlinked XDG ownership root: {path}")
-            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            try:
+                path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            except FileExistsError as exc:
+                raise IntegrityError(f"XDG ownership root is not a directory: {path}") from exc
+            info = path.lstat()
+            if path.is_symlink() or not stat.S_ISDIR(info.st_mode):
+                raise IntegrityError(f"XDG ownership root is not a regular directory: {path}")
+            if info.st_uid != os.getuid():
+                raise IntegrityError(f"XDG ownership root is not owned by the current user: {path}")
             path.chmod(0o700)
+            if stat.S_IMODE(path.lstat().st_mode) != 0o700:
+                raise IntegrityError(f"XDG ownership root permissions could not be secured: {path}")
 
     def owned_roots(self) -> tuple[Path, ...]:
         return self.cache, self.state, self.config, self.data

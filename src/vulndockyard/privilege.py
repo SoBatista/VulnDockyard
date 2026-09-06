@@ -11,7 +11,7 @@ from pathlib import Path
 from .errors import PreflightError
 from .process import Runner
 
-HELPER_SHA256 = "4eafd8cdddaa41b454c1a49f6ba56fa0ecad9309dfa0a75757767f866cfffc67"
+HELPER_SHA256 = "5b5385800a855a848ae9e8784c839b8aef42fa91d201898a26f687085cc0fb10"
 HELPER_PATHS = (
     Path("/usr/local/libexec/vulndockyard-hosts"),
     Path("/usr/libexec/vulndockyard-hosts"),

@@ -227,7 +227,7 @@ def test_provider_absent_and_malformed_cache_are_honest(xdg_paths: Paths) -> Non
     assert provider.status()["state"] == "not-synced"
     with pytest.raises(PolicyError, match="not synced"):
         provider.entries()
-    provider.root.mkdir(parents=True)
+    provider.root.mkdir(mode=0o700, parents=True)
     provider.index_path.write_text("{}", encoding="utf-8")
     lock = load_provider_lock()
     data = provider.index_path.read_bytes()
@@ -241,8 +241,45 @@ def test_provider_absent_and_malformed_cache_are_honest(xdg_paths: Paths) -> Non
         ),
         encoding="utf-8",
     )
+    provider.index_path.chmod(0o600)
+    (provider.root / "integrity.json").chmod(0o600)
+    assert provider.status()["state"] == "stale-or-corrupt"
     with pytest.raises(IntegrityError, match="malformed"):
         provider.entries()
+
+
+def test_provider_cache_rejects_symlinked_or_overpermissive_roots(
+    xdg_paths: Paths, tmp_path: Path
+) -> None:
+    provider = VulhubProvider(xdg_paths)
+    provider.root.parent.mkdir(mode=0o700, parents=True)
+    target = tmp_path / "foreign-cache"
+    target.mkdir()
+    provider.root.symlink_to(target, target_is_directory=True)
+    assert provider.status()["state"] == "stale-or-corrupt"
+    with pytest.raises(IntegrityError, match="unsafe type"):
+        provider.entries()
+
+    provider.root.unlink()
+    provider.root.mkdir(mode=0o700)
+    provider.root.chmod(0o755)
+    assert provider.status()["state"] == "stale-or-corrupt"
+    with pytest.raises(IntegrityError, match="unsafe type"):
+        provider.entries()
+
+
+def test_provider_sync_rejects_symlinked_cache_parent_before_network_access(
+    xdg_paths: Paths, tmp_path: Path
+) -> None:
+    xdg_paths.ensure()
+    foreign = tmp_path / "foreign-provider-cache"
+    foreign.mkdir()
+    provider_parent = xdg_paths.cache / "providers"
+    provider_parent.symlink_to(foreign, target_is_directory=True)
+
+    with pytest.raises(IntegrityError, match="cache parent"):
+        VulhubProvider(xdg_paths).sync()
+    assert list(foreign.iterdir()) == []
 
 
 def test_reviewed_allowlist_contract_is_strict(

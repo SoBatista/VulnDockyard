@@ -69,6 +69,7 @@ def _verify_main_ci(head: str) -> None:
     value = json.loads(result.stdout)
     expected = {
         "name": "CI",
+        "path": ".github/workflows/ci.yml",
         "head_branch": "main",
         "head_sha": head,
         "conclusion": "success",

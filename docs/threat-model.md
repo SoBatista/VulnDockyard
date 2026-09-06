@@ -37,12 +37,14 @@ visitor; containment must assume that outcome.
   output. Health checks verify identity and expected functionality markers.
 - Cleanup requires exact state IDs plus every ownership label. No global prune or
   prefix-only deletion exists.
-- Hosts editing uses an exact block, regular-file/owner/mode checks, a same-directory
-  temporary, validation, atomic replacement, and preservation of unrelated bytes.
+- Hosts editing uses an exact block, no-follow descriptor reads, regular-file/owner/mode
+  and inode checks, a same-directory temporary, validation, atomic replacement, and
+  preservation of unrelated bytes. An inode change before replacement aborts the edit.
   Elevation executes only a fixed root-owned, non-writable, checksum-matched helper;
   user-writable virtual-environment and project Python code never runs as root.
 - Provider downloads require pinned commit and archive checksum; extraction rejects
-  traversal, links, devices, duplicates, and resource bombs.
+  traversal, links, devices, duplicates, and resource bombs. Provider cache roots and
+  metadata must remain current-user-owned, private, regular non-symlink paths.
 
 ## Residual risk
 

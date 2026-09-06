@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 from scripts import self_test
@@ -63,3 +64,31 @@ def test_self_test_launcher_rejects_unbounded_overall_watchdog() -> None:
     assert result.returncode == 2
     assert result.stdout == ""
     assert result.stderr == "VDY_SELF_TEST_TIMEOUT_SECONDS must not exceed 3600 seconds.\n"
+
+
+def test_initialization_failure_checkpoint_cannot_retain_stale_passes() -> None:
+    phases = (
+        self_test.Phase("first", ("tool", "one"), 10),
+        self_test.Phase("second", ("tool", "two"), 20),
+    )
+    report = self_test._initialization_failure_report(
+        started_at=datetime.now(UTC),
+        phases=phases,
+        reason="RuntimeError: catalogue unavailable",
+        version="1.0.0",
+        commit="unavailable",
+        tree="unavailable",
+    )
+
+    assert report["result"] == "fail"
+    assert report["initialization"] == {
+        "result": "fail",
+        "reason": "RuntimeError: catalogue unavailable",
+    }
+    assert [gate["result"] for gate in report["gates"]] == ["skip", "skip"]
+    assert all("initialization failed" in gate["reason"] for gate in report["gates"])
+    assert report["residual_docker_resources"] == {
+        "audit_error": [
+            "not run because self-test initialization failed: RuntimeError: catalogue unavailable"
+        ]
+    }

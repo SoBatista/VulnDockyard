@@ -21,12 +21,30 @@ def fail(message):
 
 
 def bounds(content):
-    if content.count(BEGIN) != content.count(END) or content.count(BEGIN) > 1:
-        fail("hosts file contains ambiguous VulnDockyard markers")
-    if BEGIN not in content:
+    def exact_marker(marker):
+        token = marker.rstrip(b"\n")
+        count = content.count(token)
+        if count > 1:
+            fail("hosts file contains multiple VulnDockyard blocks")
+        if count == 0:
+            return None
+        position = content.index(token)
+        if (
+            (position != 0 and content[position - 1 : position] != b"\n")
+            or content[position : position + len(marker)] != marker
+        ):
+            fail("hosts file contains an inexact VulnDockyard marker")
+        return position
+
+    start = exact_marker(BEGIN)
+    end_start = exact_marker(END)
+    if (start is None) != (end_start is None):
+        fail("hosts file contains an incomplete VulnDockyard block")
+    if start is None or end_start is None:
         return None
-    start = content.index(BEGIN)
-    return start, content.index(END, start) + len(END)
+    if end_start <= start:
+        fail("hosts file contains misordered VulnDockyard markers")
+    return start, end_start + len(END)
 
 
 def parse(content):
@@ -87,8 +105,24 @@ def main():
         fail("/etc/hosts must be a regular non-symlink file")
     if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         fail("/etc/hosts has unsafe ownership or mode")
-    with open(HOSTS, "rb") as handle:
-        content = handle.read(2_000_001)
+    descriptor = os.open(HOSTS, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            fail("/etc/hosts changed during validation")
+        if not stat.S_ISREG(opened.st_mode) or opened.st_uid != 0:
+            fail("opened /etc/hosts has unsafe ownership or type")
+        chunks = []
+        remaining = 2_000_001
+        while remaining:
+            chunk = os.read(descriptor, min(65_536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+    finally:
+        os.close(descriptor)
     if len(content) > 2_000_000 or b"\x00" in content:
         fail("/etc/hosts is too large or contains a NUL byte")
     values = set(parse(content))
@@ -111,6 +145,12 @@ def main():
         with open(temporary, "rb") as handle:
             if parse(handle.read()) != expected:
                 fail("temporary hosts file failed validation")
+        current = os.lstat(HOSTS)
+        if stat.S_ISLNK(current.st_mode) or (current.st_dev, current.st_ino) != (
+            info.st_dev,
+            info.st_ino,
+        ):
+            fail("/etc/hosts changed before atomic replacement")
         os.replace(temporary, HOSTS)
         directory = os.open("/etc", os.O_RDONLY | os.O_DIRECTORY)
         try:

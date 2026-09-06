@@ -78,6 +78,21 @@ def _bootstrap_release_is_ancestor(base_sha: str) -> bool:
     return relation.returncode == 0
 
 
+def _base_changelog_has_bootstrap_release(base_sha: str) -> bool:
+    result = subprocess.run(  # noqa: S603 - validated SHA, fixed git subcommand
+        (_executable("git"), "show", f"{base_sha}:CHANGELOG.md"),
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("could not inspect the base changelog release state")
+    return (
+        re.search(rb"^## \[1\.0\.0\] - \d{4}-\d{2}-\d{2}$", result.stdout, re.MULTILINE) is not None
+    )
+
+
 def _live_labels() -> set[str]:
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     number = os.environ.get("VDY_PR_NUMBER", "")
@@ -112,6 +127,10 @@ def check() -> None:
     if not _bootstrap_release_is_ancestor(base_sha):
         if current != "1.0.0" or base != "1.0.0":
             raise RuntimeError("pre-release bootstrap changes must remain exactly version 1.0.0")
+        if _base_changelog_has_bootstrap_release(base_sha):
+            raise RuntimeError(
+                "released v1.0.0 tag is missing or is not an ancestor of the pull-request base"
+            )
         return
     selected = _live_labels() & LABELS
     if len(selected) != 1:

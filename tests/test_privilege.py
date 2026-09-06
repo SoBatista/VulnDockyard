@@ -58,6 +58,19 @@ def test_packaged_helper_preserves_a_missing_final_newline_round_trip() -> None:
     assert transform(added, []) == original
 
 
+@pytest.mark.parametrize(
+    "content",
+    (
+        b"prefix # BEGIN VULNDOCKYARD MANAGED BLOCK\n# END VULNDOCKYARD MANAGED BLOCK\n",
+        b"# END VULNDOCKYARD MANAGED BLOCK\n# BEGIN VULNDOCKYARD MANAGED BLOCK\n",
+    ),
+)
+def test_packaged_helper_rejects_inexact_or_misordered_markers(content: bytes) -> None:
+    namespace = runpy.run_path(str(privilege.packaged_helper()), run_name="vdy_hosts_helper_test")
+    with pytest.raises(SystemExit):
+        namespace["bounds"](content)
+
+
 def test_root_metadata_contract() -> None:
     safe = cast(os.stat_result, SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o755))
     writable = cast(os.stat_result, SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o775))

@@ -45,6 +45,9 @@ def test_transform_rejects_unsafe_hostname(hostname: str) -> None:
         BEGIN.encode() + b"127.0.0.1 x.test\n",
         (BEGIN + END + BEGIN + END).encode(),
         (BEGIN + "0.0.0.0\tx.test\n" + END).encode(),
+        b"prefix " + (BEGIN + END).encode(),
+        (END + BEGIN).encode(),
+        BEGIN.rstrip("\n").encode() + b" suffix\n" + END.encode(),
         b"hosts\x00file",
     ],
 )
@@ -91,3 +94,25 @@ def test_manager_rejects_oversized_and_nul_content(tmp_path: Path) -> None:
     path.write_bytes(b"127.0.0.1 localhost\n\x00")
     with pytest.raises(IntegrityError, match="NUL"):
         HostsManager(path).preview("juice-shop.test", add=True)
+
+
+def test_manager_refuses_replacement_after_hosts_inode_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "hosts"
+    path.write_bytes(b"127.0.0.1 localhost\n")
+    path.chmod(0o600)
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"127.0.0.1 localhost\n# concurrent change\n")
+    replacement.chmod(0o600)
+    manager = HostsManager(path)
+    require_unchanged = manager._require_unchanged
+
+    def swap_before_validation(expected: object) -> None:
+        replacement.replace(path)
+        require_unchanged(expected)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(manager, "_require_unchanged", swap_before_validation)
+    with pytest.raises(PolicyError, match="changed before atomic replacement"):
+        manager.apply("juice-shop.test", add=True)
+    assert path.read_bytes().endswith(b"# concurrent change\n")

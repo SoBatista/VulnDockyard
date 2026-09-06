@@ -169,6 +169,63 @@ def test_capability_port_and_volume_extras_are_rejected() -> None:
     } <= paths
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("environment", ["LD_PRELOAD=/host/evil"]),
+        ("environment", {"INVALID-NAME": "value"}),
+        ("expose", [0]),
+        ("expose", ["80/udp"]),
+        ("depends_on", {"database": {"condition": "service_started"}}),
+        ("depends_on", ["missing"]),
+        ("healthcheck", {"test": ["CMD-SHELL", "touch /host/file"]}),
+        ("tmpfs", ["/run:size=100G"]),
+        ("working_dir", "/srv/../host"),
+        ("stop_grace_period", "999m"),
+        ("hostname", "bad hostname"),
+    ],
+)
+def test_optional_service_fields_are_validated_fail_closed(key: str, value: object) -> None:
+    document = safe_document()
+    document["services"]["app"][key] = value  # type: ignore[index]
+    review = validate_compose(document, approved_images={IMAGE})
+    assert not review.accepted
+    assert any(finding.path == f"services.app.{key}" for finding in review.findings)
+
+
+def test_bounded_optional_service_fields_require_reviewed_health_command() -> None:
+    document = safe_document()
+    service = document["services"]["app"]  # type: ignore[index]
+    service.update(
+        {
+            "environment": {"MODE": "training", "COUNT": 2},
+            "expose": [8080, "8443/tcp"],
+            "depends_on": [],
+            "healthcheck": {
+                "test": ["CMD", "/usr/bin/check", "--ready"],
+                "interval": "10s",
+                "timeout": "2s",
+                "retries": 3,
+                "start_period": "1m",
+            },
+            "working_dir": "/srv/lab",
+            "stop_grace_period": "30s",
+            "hostname": "lab-app",
+        }
+    )
+    assert validate_compose(document, approved_images={IMAGE}, allow_commands={"app"}).accepted
+
+
+@pytest.mark.parametrize("target", ("/data/../host", "//host/share", "/", "/data/:ro"))
+def test_volume_targets_must_be_normalized_absolute_paths(target: str) -> None:
+    document = safe_document()
+    document["services"]["app"]["volumes"] = [  # type: ignore[index]
+        {"type": "volume", "source": "data", "target": target}
+    ]
+    review = validate_compose(document, approved_images={IMAGE})
+    assert any(finding.path == "services.app.volumes" for finding in review.findings)
+
+
 def test_unhashable_capabilities_and_networks_are_rejected_without_crashing() -> None:
     document = safe_document()
     service = document["services"]["app"]  # type: ignore[index]

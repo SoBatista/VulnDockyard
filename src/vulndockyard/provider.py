@@ -6,8 +6,10 @@ import hashlib
 import io
 import json
 import math
+import os
 import re
 import shutil
+import stat
 import tarfile
 import tempfile
 import tomllib
@@ -123,6 +125,66 @@ class VulhubProvider:
         self.paths = paths or Paths.discover()
         self.root = self.paths.cache / "providers" / "vulhub"
         self.index_path = self.root / "index.json"
+
+    @staticmethod
+    def _safe_path_exists(path: Path, *, directory: bool) -> bool:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return False
+        expected_type = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not expected_type
+            or info.st_uid != os.getuid()
+            or info.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+        ):
+            raise IntegrityError(f"Vulhub cache path has unsafe type, ownership, or mode: {path}")
+        return True
+
+    @staticmethod
+    def _ensure_private_directory(path: Path) -> None:
+        try:
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except FileExistsError as exc:
+            raise IntegrityError("Vulhub cache parent is not a directory") from exc
+        info = path.lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+        ):
+            raise IntegrityError("Vulhub cache parent has unsafe type or ownership")
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+                or not stat.S_ISDIR(opened.st_mode)
+                or opened.st_uid != os.getuid()
+            ):
+                raise IntegrityError("Vulhub cache parent changed during validation")
+            os.fchmod(descriptor, 0o700)
+            if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o700:
+                raise IntegrityError("Vulhub cache parent permissions could not be secured")
+        finally:
+            os.close(descriptor)
+
+    def _cache_metadata(self) -> tuple[object, bytes]:
+        if not self._safe_path_exists(self.root, directory=True):
+            raise FileNotFoundError(self.root)
+        integrity_path = self.root / "integrity.json"
+        for path in (self.index_path, integrity_path):
+            if not self._safe_path_exists(path, directory=False):
+                raise IntegrityError(f"Vulhub cache metadata is missing: {path.name}")
+            if path.stat().st_size > 20_000_000:
+                raise IntegrityError(f"Vulhub cache metadata exceeds 20 MB: {path.name}")
+        index_bytes = self.index_path.read_bytes()
+        integrity = strict_json_loads(integrity_path.read_text(encoding="utf-8"))
+        return integrity, index_bytes
 
     def _allowlist(self) -> dict[str, dict[str, Any]]:
         value = _load_resource("vulhub-allowlist.json")
@@ -279,6 +341,8 @@ class VulhubProvider:
         return roots[0]
 
     def sync(self, *, timeout: float = 60) -> tuple[ProviderEntry, ...]:
+        self.paths.ensure()
+        self._ensure_private_directory(self.root.parent)
         lock = load_provider_lock()
         expected_archive = f"https://codeload.github.com/vulhub/vulhub/tar.gz/{lock.commit}"
         if (
@@ -303,7 +367,6 @@ class VulhubProvider:
             raise IntegrityError(
                 f"Vulhub archive checksum mismatch: expected {lock.archive_sha256}, got {actual}"
             )
-        self.root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix=".vulhub-", dir=self.root.parent))
         previous = self.root.with_name("vulhub.previous")
         backed_up = False
@@ -333,9 +396,9 @@ class VulhubProvider:
                 + "\n",
                 encoding="utf-8",
             )
-            if previous.exists():
+            if self._safe_path_exists(previous, directory=True):
                 remove_owned_tree(previous, self.root.parent)
-            if self.root.exists():
+            if self._safe_path_exists(self.root, directory=True):
                 self.root.rename(previous)
                 backed_up = True
             temporary.rename(self.root)
@@ -343,14 +406,14 @@ class VulhubProvider:
             self.root.chmod(0o700)
             for metadata_file in (self.index_path, self.root / "integrity.json"):
                 metadata_file.chmod(0o600)
-            if previous.exists():
+            if self._safe_path_exists(previous, directory=True):
                 remove_owned_tree(previous, self.root.parent)
         except BaseException:
-            if activated and self.root.exists():
+            if activated and self._safe_path_exists(self.root, directory=True):
                 remove_owned_tree(self.root, self.root.parent)
-            if backed_up and previous.exists():
+            if backed_up and self._safe_path_exists(previous, directory=True):
                 previous.rename(self.root)
-            if temporary.exists():
+            if self._safe_path_exists(temporary, directory=True):
                 remove_owned_tree(temporary, self.root.parent)
             raise
         return entries
@@ -461,21 +524,19 @@ class VulhubProvider:
     def status(self) -> dict[str, object]:
         lock = load_provider_lock()
         try:
-            integrity = strict_json_loads(
-                (self.root / "integrity.json").read_text(encoding="utf-8")
-            )
-            index_bytes = self.index_path.read_bytes()
+            integrity, index_bytes = self._cache_metadata()
             entries = self._parse_entries(index_bytes)
-        except (
-            FileNotFoundError,
-            OSError,
-            json.JSONDecodeError,
-            StrictJSONError,
-            IntegrityError,
-        ):
+        except FileNotFoundError:
             return {
                 "provider": "vulhub",
                 "state": "not-synced",
+                "pinned_commit": lock.commit,
+                "entries": 0,
+            }
+        except (OSError, json.JSONDecodeError, StrictJSONError, IntegrityError):
+            return {
+                "provider": "vulhub",
+                "state": "stale-or-corrupt",
                 "pinned_commit": lock.commit,
                 "entries": 0,
             }
@@ -495,12 +556,11 @@ class VulhubProvider:
     def entries(self) -> tuple[ProviderEntry, ...]:
         try:
             lock = load_provider_lock()
-            index_bytes = self.index_path.read_bytes()
-            integrity = strict_json_loads(
-                (self.root / "integrity.json").read_text(encoding="utf-8")
-            )
-        except (FileNotFoundError, OSError, json.JSONDecodeError, StrictJSONError) as exc:
+            integrity, index_bytes = self._cache_metadata()
+        except FileNotFoundError as exc:
             raise PolicyError("Vulhub provider is not synced; run provider sync vulhub") from exc
+        except (OSError, json.JSONDecodeError, StrictJSONError) as exc:
+            raise IntegrityError("Vulhub provider cache metadata is malformed") from exc
         expected = {
             "commit": lock.commit,
             "archive_sha256": lock.archive_sha256,

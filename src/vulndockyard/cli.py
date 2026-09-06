@@ -94,7 +94,9 @@ def build_parser() -> Parser:
         help="acknowledge declared outbound Internet access",
     )
     up.add_argument(
-        "--unsafe-development", action="store_true", help="mark a development run untrusted"
+        "--unsafe-development",
+        action="store_true",
+        help="authorize an immutable image override or resume an existing untrusted run",
     )
     up.add_argument(
         "--unsafe-image", metavar="NAME@SHA256", help="immutable untrusted development app image"

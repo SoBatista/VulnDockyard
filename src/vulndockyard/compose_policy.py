@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import math
+import posixpath
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
@@ -29,7 +31,6 @@ SERVICE_KEYS = {
     "healthcheck",
     "restart",
     "read_only",
-    "tmpfs",
     "cap_drop",
     "cap_add",
     "security_opt",
@@ -65,12 +66,16 @@ DANGEROUS_KEYS = {
     "platform",
     "env_file",
     "container_name",
+    "tmpfs",
 }
 SAFE_CAPABILITIES = {"NET_BIND_SERVICE"}
 SERVICE_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
 NON_ROOT_USER = re.compile(r"^[1-9][0-9]{0,9}(?::[1-9][0-9]{0,9})?$")
 MEMORY_LIMIT = re.compile(r"^([1-9][0-9]{0,8})([KMG])$")
 LOOPBACK_PORT = re.compile(r"^127\.0\.0\.1:([1-9][0-9]{0,4}):([1-9][0-9]{0,4})(?:/tcp)?$")
+ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+EXPOSED_PORT = re.compile(r"^([1-9][0-9]{0,4})(?:/tcp)?$")
+DURATION = re.compile(r"^([1-9][0-9]{0,5})(ms|s|m)$")
 
 
 class UniqueSafeLoader(yaml.SafeLoader):
@@ -152,9 +157,9 @@ def _volume_safe(value: object, declared: set[str]) -> bool:
         source, separator, target = value.partition(":")
         return bool(
             separator
+            and value.count(":") == 1
             and source in declared
-            and target.startswith("/")
-            and ".." not in target.split("/")
+            and _absolute_container_path(target)
         )
     if isinstance(value, dict):
         volume_options = value.get("volume")
@@ -163,7 +168,7 @@ def _volume_safe(value: object, declared: set[str]) -> bool:
             and isinstance(value.get("source"), str)
             and value["source"] in declared
             and isinstance(value.get("target"), str)
-            and value["target"].startswith("/")
+            and _absolute_container_path(value["target"])
             and set(value).issubset({"type", "source", "target", "read_only", "volume"})
             and ("read_only" not in value or isinstance(value["read_only"], bool))
             and (
@@ -176,6 +181,111 @@ def _volume_safe(value: object, declared: set[str]) -> bool:
             )
         )
     return False
+
+
+def _absolute_container_path(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and 1 < len(value) <= 4096
+        and value.startswith("/")
+        and not value.startswith("//")
+        and posixpath.normpath(value) == value
+        and ":" not in value
+        and "\x00" not in value
+    )
+
+
+def _command_safe(value: object) -> bool:
+    if isinstance(value, str):
+        return 1 <= len(value) <= 4096 and value.isprintable()
+    return bool(
+        isinstance(value, list)
+        and 1 <= len(value) <= 128
+        and all(
+            isinstance(item, str) and 1 <= len(item) <= 4096 and item.isprintable()
+            for item in value
+        )
+        and sum(len(item) for item in value) <= 16_384
+    )
+
+
+def _environment_safe(value: object) -> bool:
+    if not isinstance(value, dict) or len(value) > 128:
+        return False
+    for key, item in value.items():
+        if not isinstance(key, str) or ENVIRONMENT_NAME.fullmatch(key) is None:
+            return False
+        if isinstance(item, bool | int):
+            continue
+        if isinstance(item, float):
+            if math.isfinite(item):
+                continue
+            return False
+        if not isinstance(item, str) or len(item) > 4096 or not item.isprintable():
+            return False
+    return True
+
+
+def _expose_safe(value: object) -> bool:
+    if not isinstance(value, list) or len(value) > 32:
+        return False
+    normalized: list[int] = []
+    for item in value:
+        if isinstance(item, int) and not isinstance(item, bool):
+            port = item
+        elif isinstance(item, str):
+            match = EXPOSED_PORT.fullmatch(item)
+            if match is None:
+                return False
+            port = int(match.group(1))
+        else:
+            return False
+        if not 1 <= port <= 65535:
+            return False
+        normalized.append(port)
+    return len(normalized) == len(set(normalized))
+
+
+def _depends_on_safe(value: object, services: set[str]) -> bool:
+    return bool(
+        isinstance(value, list)
+        and len(value) <= 64
+        and all(isinstance(item, str) and item in services for item in value)
+        and len(value) == len(set(value))
+    )
+
+
+def _duration_safe(value: object, *, maximum_seconds: int = 600) -> bool:
+    match = DURATION.fullmatch(value) if isinstance(value, str) else None
+    if match is None:
+        return False
+    amount = int(match.group(1))
+    unit = match.group(2)
+    milliseconds = amount * {"ms": 1, "s": 1000, "m": 60_000}[unit]
+    return 1 <= milliseconds <= maximum_seconds * 1000
+
+
+def _healthcheck_safe(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    allowed = {"test", "interval", "timeout", "retries", "start_period", "start_interval"}
+    if not set(value).issubset(allowed) or "test" not in value:
+        return False
+    test = value["test"]
+    if (
+        not isinstance(test, list)
+        or len(test) < 2
+        or test[0] not in {"CMD", "CMD-SHELL"}
+        or not _command_safe(test[1:])
+    ):
+        return False
+    for key in ("interval", "timeout", "start_interval"):
+        if key in value and not _duration_safe(value[key]):
+            return False
+    if "start_period" in value and not _duration_safe(value["start_period"], maximum_seconds=3600):
+        return False
+    retries = value.get("retries", 1)
+    return isinstance(retries, int) and not isinstance(retries, bool) and 1 <= retries <= 100
 
 
 def _port_safe(value: object, *, gateway: bool) -> bool:
@@ -258,10 +368,18 @@ def validate_compose(
         not isinstance(version, str) or re.fullmatch(r"[23](?:\.[0-9]+)?", version) is None
     ):
         findings.append(Finding("version", "legacy Compose version is malformed"))
+    project_name = document.get("name")
+    if project_name is not None and (
+        not isinstance(project_name, str) or SERVICE_NAME.fullmatch(project_name) is None
+    ):
+        findings.append(Finding("name", "Compose project name is malformed"))
     services = document.get("services")
     if not isinstance(services, dict) or not services:
         findings.append(Finding("services", "a non-empty service map is required"))
         return ComposeReview(False, tuple(findings))
+    service_names = {
+        name for name in services if isinstance(name, str) and SERVICE_NAME.fullmatch(name)
+    }
     volumes = document.get("volumes", {})
     declared_volumes = (
         {name for name in volumes if isinstance(name, str)} if isinstance(volumes, dict) else set()
@@ -361,6 +479,56 @@ def validate_compose(
             findings.append(
                 Finding(f"{path}.entrypoint", "imported entrypoints require entry-specific review")
             )
+        for key in ("command", "entrypoint"):
+            if key in service and not _command_safe(service[key]):
+                findings.append(Finding(f"{path}.{key}", "command form is malformed or unbounded"))
+        if "environment" in service and not _environment_safe(service["environment"]):
+            findings.append(
+                Finding(
+                    f"{path}.environment",
+                    "environment must be a bounded literal string-keyed object",
+                )
+            )
+        if "expose" in service and not _expose_safe(service["expose"]):
+            findings.append(Finding(f"{path}.expose", "exposed ports are malformed or unbounded"))
+        if "depends_on" in service and not _depends_on_safe(service["depends_on"], service_names):
+            findings.append(
+                Finding(
+                    f"{path}.depends_on",
+                    "dependencies must be a bounded list of declared services",
+                )
+            )
+        if "healthcheck" in service:
+            if name not in commands:
+                findings.append(
+                    Finding(
+                        f"{path}.healthcheck",
+                        "health-check commands require entry-specific review",
+                    )
+                )
+            if not _healthcheck_safe(service["healthcheck"]):
+                findings.append(
+                    Finding(f"{path}.healthcheck", "health check is malformed or unbounded")
+                )
+        if "working_dir" in service and not _absolute_container_path(service["working_dir"]):
+            findings.append(
+                Finding(
+                    f"{path}.working_dir", "working directory must be a normalized absolute path"
+                )
+            )
+        if "stop_grace_period" in service and not _duration_safe(
+            service["stop_grace_period"], maximum_seconds=120
+        ):
+            findings.append(
+                Finding(
+                    f"{path}.stop_grace_period", "stop grace period must be between 1ms and 120s"
+                )
+            )
+        if "hostname" in service and (
+            not isinstance(service["hostname"], str)
+            or SERVICE_NAME.fullmatch(service["hostname"]) is None
+        ):
+            findings.append(Finding(f"{path}.hostname", "service hostname is malformed"))
         service_volumes = service.get("volumes", [])
         if not isinstance(service_volumes, list) or any(
             not _volume_safe(value, declared_volumes) for value in service_volumes

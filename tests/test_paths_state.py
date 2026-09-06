@@ -38,6 +38,22 @@ def test_relative_xdg_path_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
         Paths.discover()
 
 
+def test_xdg_ownership_roots_reject_files_and_direct_symlinks(tmp_path: Path) -> None:
+    invalid = tmp_path / "not-a-directory"
+    invalid.write_text("unsafe", encoding="utf-8")
+    paths = Paths(invalid, tmp_path / "state", tmp_path / "config", tmp_path / "data")
+    with pytest.raises(IntegrityError, match="not a directory"):
+        paths.ensure()
+
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    paths = Paths(link, tmp_path / "state-2", tmp_path / "config-2", tmp_path / "data-2")
+    with pytest.raises(IntegrityError, match="not a regular directory"):
+        paths.ensure()
+
+
 def test_guarded_deletion_rejects_root_escape_and_symlink(tmp_path: Path) -> None:
     root = tmp_path / "owned"
     target = root / "lab"

@@ -5,6 +5,8 @@ The provider pins official `vulhub/vulhub` commit
 archive SHA-256. `provider sync vulhub` downloads into an XDG cache, verifies the
 archive, rejects unsafe tar members, parses `environments.toml` and Compose, then
 writes a separately checksummed deterministic index.
+The provider first secures the XDG roots, and every later cache read rejects
+symlinked, non-private, non-regular, or foreign-owned cache metadata.
 The lock uses the exact HTTPS `codeload.github.com` commit URL; proxy use and HTTP
 redirects are disabled so retrieval cannot be redirected to a host-local or LAN
 endpoint before the archive checksum is evaluated.

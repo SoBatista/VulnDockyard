@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from scripts.check_version import check_release_ready
 from scripts.check_workflows import check as check_workflows
 from scripts.generate_sbom import generate
 from scripts.release import _expected_artifacts, _release_metadata, _verify_sums
+from scripts import release as release_module
 from scripts.release_artifacts import changelog_notes
 
 
@@ -127,3 +129,27 @@ def test_existing_release_metadata_must_match_exactly() -> None:
             notes="reviewed notes\n",
             expected_assets=assets,
         )
+
+
+def test_release_authorization_is_bound_to_exact_ci_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VDY_CI_RUN_ID", "12345")
+    response = {
+        "name": "CI",
+        "path": ".github/workflows/ci.yml",
+        "head_branch": "main",
+        "head_sha": "a" * 40,
+        "conclusion": "success",
+        "event": "push",
+    }
+    monkeypatch.setattr(
+        release_module,
+        "_run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, json.dumps(response), ""),
+    )
+    release_module._verify_main_ci("a" * 40)
+
+    response["path"] = ".github/workflows/lookalike.yml"
+    with pytest.raises(RuntimeError, match="successful CI result"):
+        release_module._verify_main_ci("a" * 40)

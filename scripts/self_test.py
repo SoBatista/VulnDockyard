@@ -277,6 +277,64 @@ def _phases() -> tuple[Phase, ...]:
     )
 
 
+def _remote_bootstrap_gates() -> list[dict[str, object]]:
+    return [
+        {
+            "gate": "hosted CI and security workflows",
+            "result": "skip",
+            "required_before_release": True,
+            "reason": "not verified by this local command; inspect hosted CI for the exact commit",
+        },
+        {
+            "gate": "repository ruleset and private vulnerability reporting",
+            "result": "skip",
+            "required_before_release": True,
+            "reason": "GitHub repository settings cannot be proven by a local gate",
+        },
+        {
+            "gate": "GitHub artifact attestation and published artifact verification",
+            "result": "skip",
+            "required_before_release": True,
+            "reason": "requires an explicitly approved stable release",
+        },
+        {
+            "gate": "GHCR keyless signing",
+            "result": "skip",
+            "required_before_release": False,
+            "reason": "no redistribution-authorized project-built image exists in 1.0.0",
+        },
+    ]
+
+
+def _initialization_failure_report(
+    *,
+    started_at: datetime,
+    phases: tuple[Phase, ...],
+    reason: str,
+    version: str,
+    commit: str,
+    tree: str,
+) -> dict[str, Any]:
+    skip_reason = f"not run because self-test initialization failed: {reason}"
+    finished_at = datetime.now(UTC)
+    return {
+        "schema_version": 1,
+        "version": version,
+        "commit": commit,
+        "tree": tree,
+        "started_at": started_at.isoformat().replace("+00:00", "Z"),
+        "finished_at": finished_at.isoformat().replace("+00:00", "Z"),
+        "duration_seconds": round((finished_at - started_at).total_seconds(), 3),
+        "result": "fail",
+        "initialization": {"result": "fail", "reason": reason},
+        "gates": [_skipped_phase(phase, skip_reason) for phase in phases],
+        "labs": [],
+        "images": [],
+        "residual_docker_resources": {"audit_error": [skip_reason]},
+        "remote_bootstrap_gates": _remote_bootstrap_gates(),
+    }
+
+
 def main() -> int:
     global ACTIVE_PHASES, ACTIVE_REPORT, SELF_TEST_STARTED
 
@@ -284,13 +342,30 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _overall_timeout)
     started_at = datetime.now(UTC)
     SELF_TEST_STARTED = time.monotonic()
+    phases = _phases()
+    ACTIVE_PHASES = phases
+    version = "unavailable"
+    commit = "unavailable"
+    tree = "unavailable"
     try:
         version = authoritative_version()
         commit = _git("rev-parse", "HEAD")
         tree = _git("rev-parse", "HEAD^{tree}")
         labs, images = _inventory()
     except Exception as exc:
-        print(f"self-test initialization failed: {exc}", file=sys.stderr)
+        reason = f"{type(exc).__name__}: {exc}"
+        report = _initialization_failure_report(
+            started_at=started_at,
+            phases=phases,
+            reason=reason,
+            version=version,
+            commit=commit,
+            tree=tree,
+        )
+        ACTIVE_REPORT = report
+        _checkpoint(report)
+        print(f"self-test initialization failed: {reason}", file=sys.stderr)
+        print(f"Checkpoint: {ROOT / 'artifacts' / 'checkpoint.json'}")
         return 1
     report: dict[str, Any] = {
         "schema_version": 1,
@@ -304,40 +379,11 @@ def main() -> int:
         "labs": labs,
         "images": images,
         "residual_docker_resources": None,
-        "remote_bootstrap_gates": [
-            {
-                "gate": "hosted CI and security workflows",
-                "result": "skip",
-                "required_before_release": True,
-                "reason": (
-                    "not verified by this local command; inspect hosted CI for the exact commit"
-                ),
-            },
-            {
-                "gate": "repository ruleset and private vulnerability reporting",
-                "result": "skip",
-                "required_before_release": True,
-                "reason": "GitHub repository settings cannot be proven by a local gate",
-            },
-            {
-                "gate": "GitHub artifact attestation and published artifact verification",
-                "result": "skip",
-                "required_before_release": True,
-                "reason": "requires an explicitly approved stable release",
-            },
-            {
-                "gate": "GHCR keyless signing",
-                "result": "skip",
-                "required_before_release": False,
-                "reason": "no redistribution-authorized project-built image exists in 1.0.0",
-            },
-        ],
+        "remote_bootstrap_gates": _remote_bootstrap_gates(),
     }
     ACTIVE_REPORT = report
     _checkpoint(report)
     failed = False
-    phases = _phases()
-    ACTIVE_PHASES = phases
     for index, phase in enumerate(phases):
         result = _run_phase(phase)
         report["gates"].append(result)

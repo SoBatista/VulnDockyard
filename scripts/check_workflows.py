@@ -194,6 +194,19 @@ def check() -> None:
             if "push" in event_names or "pull_request" in event_names:
                 failures.append("release.yml: development events must never publish")
         text = path.read_text(encoding="utf-8")
+        if path.name == "ci.yml":
+            smoke = jobs.get("docker-smoke", {})
+            smoke_text = str(smoke)
+            for required in (
+                "github.event.before",
+                "git cat-file -e",
+                "0000000000000000000000000000000000000000",
+                "run_smoke=true",
+            ):
+                if required not in smoke_text:
+                    failures.append(
+                        f"ci.yml: Docker smoke classifier lacks fail-closed marker: {required}"
+                    )
         for match in re.finditer(r"retention-days:\s*(\d+)", text):
             if int(match.group(1)) > 7:
                 failures.append(f"{path.name}: artifact retention exceeds seven days")

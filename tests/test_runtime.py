@@ -1931,7 +1931,9 @@ def test_restart_and_rebuild_refuse_to_replace_preserved_old_lock(
     )
 
 
-def test_rebuild_refuses_an_untrusted_reference_before_cleanup(xdg_paths: Paths) -> None:
+def test_restart_and_rebuild_refuse_an_untrusted_reference_before_cleanup(
+    xdg_paths: Paths,
+) -> None:
     value, docker, lab = runtime(xdg_paths)
     image = "dev.example/app@sha256:" + "f" * 64
     value.up(lab, host_port=18080, unsafe_image=image, unsafe_development=True)
@@ -1940,12 +1942,19 @@ def test_rebuild_refuses_an_untrusted_reference_before_cleanup(xdg_paths: Paths)
     ids_before = set(docker.objects)
     removed_before = tuple(docker.removed)
 
+    with pytest.raises(PolicyError, match="restart refuses an untrusted"):
+        value.restart(lab)
     with pytest.raises(PolicyError, match="reference differs"):
         value.rebuild(lab)
 
     assert value.store.load(lab.manifest.id) == state
     assert set(docker.objects) == ids_before
     assert tuple(docker.removed) == removed_before
+    assert all(
+        docker.objects[record.object_id]["State"]["Running"]
+        for record in state.resources
+        if record.kind == "container"
+    )
 
 
 def test_pull_fails_before_docker_for_an_unsupported_host_architecture(xdg_paths: Paths) -> None:
@@ -1982,7 +1991,18 @@ def test_purge_images_uses_only_locked_digest_references(xdg_paths: Paths) -> No
     value, docker, lab = runtime(xdg_paths)
     value.up(lab, host_port=18080)
     value.purge(lab, images=True)
-    assert set(docker.image_removals) == {image.reference for image in lab.manifest.images}
+    assert set(docker.image_removals) == {image.reference for image in lab.lock.images}
+
+    docker.image_removals.clear()
+    unresolved = Catalogue().get("crapi")
+    value.purge(unresolved, images=True)
+    assert docker.image_removals == []
+
+    pinned_quarantine = Catalogue().get("dvwa")
+    value.purge(pinned_quarantine, images=True)
+    assert set(docker.image_removals) == {
+        image.reference for image in pinned_quarantine.lock.images
+    }
 
 
 class HealthResponse(io.BytesIO):

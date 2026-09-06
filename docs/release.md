@@ -42,7 +42,8 @@ new executable or catalogue paths are never implicitly exempted.
 
 The release workflow is manual-only and must be dispatched from `main` after the
 maintainer explicitly approves publication. It accepts a CI run ID, verifies via
-the GitHub API that the run named `CI` succeeded for the identical `main` commit,
+the GitHub API that `.github/workflows/ci.yml` produced the run named `CI` and
+succeeded for the identical `main` commit,
 refuses a non-stable or inconsistent version, refuses to move an existing tag,
 creates an annotated immutable `vX.Y.Z` tag, and idempotently creates the GitHub
 Release with notes extracted from the reviewed changelog. It never runs from
@@ -69,6 +70,14 @@ Recommended solo-maintainer ruleset:
   satisfy it without routine bypasses.
 - Enable private vulnerability reporting, secret scanning, push protection,
   Dependabot alerts, and dependency graph.
+
+Before the first publication, create the `release` GitHub environment explicitly;
+do not rely on workflow dispatch to create an unprotected environment implicitly.
+Restrict its deployment branches to `main`, configure the maintainer as its required
+reviewer where the public-repository GitHub plan supports that protection, prevent
+self-review when a second trusted reviewer exists, and grant no environment secrets.
+If GitHub requires a paid plan for a required protection, stop and report that remote
+bootstrap blocker rather than weakening the publication boundary.
 
 Observe check names on the first pull request before configuring required status
 contexts; do not invent them from YAML job names. Create labels `release:major`,

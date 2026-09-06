@@ -1765,6 +1765,11 @@ class Runtime:
                 raise PolicyError(
                     "installed reviewed lock differs from the preserved runtime; use update"
                 )
+            if current is not None and not current.trusted:
+                raise PolicyError(
+                    "restart refuses an untrusted development run before stopping it; "
+                    "resume it explicitly with up --unsafe-development"
+                )
             port = current.host_port if current else 80
             self._stop(lab)
             return self._up(lab, host_port=port)
@@ -1853,7 +1858,7 @@ class Runtime:
             self._recover_runtime_transients_for_cleanup(lab)
             result = self._remove(lab)
             if images:
-                for image in lab.manifest.images:
+                for image in lab.lock.images:
                     self.docker.remove_image(image.reference)
             return result
 
