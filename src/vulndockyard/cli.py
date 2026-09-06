@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import os
 import platform
-import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -19,12 +17,13 @@ from .errors import CancelledError, ExitCode, PreflightError, VulnDockyardError
 from .hosts import HostsManager, parse_managed_hosts
 from .output import Output
 from .paths import Paths
-from .process import Runner
+from .privilege import HELPER_PATHS, HELPER_SHA256, invoke_hosts_helper, packaged_helper
 from .provider import VulhubProvider
 from .runtime import Runtime, RuntimeStatus, port_available
 from .updates import apply_reviewed_update, check_latest
 
 DESCRIPTION = "A provenance-aware local runner for intentionally vulnerable security labs."
+__all__ = ["HELPER_SHA256", "main"]
 
 
 class Parser(argparse.ArgumentParser):
@@ -133,6 +132,9 @@ def build_parser() -> Parser:
         child.add_argument(
             "--yes", action="store_true", help="confirm the exact proposed modification"
         )
+    host_commands.add_parser(
+        "helper", help="show the narrow root-owned helper installation contract"
+    )
     provider = commands.add_parser("provider", help="operate a pinned metadata provider")
     provider_commands = provider.add_subparsers(dest="provider_command", required=True)
     for name in ("sync", "status"):
@@ -206,27 +208,12 @@ def _apply_hostnames(
     if not changed:
         return {"action": action, "changed": False, "hostnames": hostnames}
     _confirm(f"{action} VulnDockyard hosts entries: {', '.join(changed)}", yes=yes)
-    if os.geteuid() == 0:
+    if manager.path != Path("/etc/hosts"):
         for hostname in changed:
             manager.apply(hostname, add=add)
     else:
-        executable = shutil.which("sudo")
-        if executable is None:
-            raise PreflightError("sudo is required for the minimal /etc/hosts helper")
-        runner = Runner()
         for hostname in changed:
-            runner.run(
-                (
-                    executable,
-                    "--",
-                    sys.executable,
-                    "-m",
-                    "vulndockyard.hosts_helper",
-                    action,
-                    hostname,
-                ),
-                timeout=60,
-            )
+            invoke_hosts_helper(action, hostname)
     final = parse_managed_hosts(manager.path.read_bytes())
     if add and not set(changed).issubset(final):
         raise PreflightError("managed hosts update could not be verified")
@@ -240,7 +227,36 @@ def _apply_hostnames(
     }
 
 
-def _doctor(paths: Paths) -> dict[str, Any]:
+def _offer_friendly_hosts(lab: ReviewedLab) -> None:
+    """Offer the optional friendly hostname without changing the start outcome."""
+
+    try:
+        manager = HostsManager()
+        hostname = lab.manifest.friendly_hostname
+        preview = manager.preview(hostname, add=True)
+    except (OSError, VulnDockyardError) as exc:
+        print(f"Warning: could not inspect optional hosts entry: {exc}", file=sys.stderr)
+        return
+    if not preview.changed:
+        return
+    print(f"Optional friendly name: add '127.0.0.1 {hostname}' to the managed hosts block.")
+    answer = input("Add it now? [y/N] ").strip().casefold()
+    if answer not in {"y", "yes"}:
+        print(f"Skipped. Add it later with: vulndockyard hosts add {lab.manifest.id}")
+        return
+    try:
+        result = _apply_hostnames(manager, (hostname,), add=True, yes=True)
+    except (OSError, VulnDockyardError) as exc:
+        print(
+            f"Warning: lab started, but the optional hosts entry was not added: {exc}",
+            file=sys.stderr,
+        )
+        return
+    outcome = "added" if result["changed"] else "already present"
+    print(f"Friendly hostname {hostname}: {outcome}")
+
+
+def _doctor(paths: Paths, hosts_manager: HostsManager | None = None) -> dict[str, Any]:
     checks: list[dict[str, object]] = []
     checks.append(
         {
@@ -283,7 +299,8 @@ def _doctor(paths: Paths) -> dict[str, Any]:
         }
     )
     try:
-        managed = parse_managed_hosts(Path("/etc/hosts").read_bytes())
+        manager = hosts_manager or HostsManager()
+        managed = parse_managed_hosts(manager.path.read_bytes())
         known = {lab.manifest.friendly_hostname for lab in Catalogue().all()}
         stale = tuple(sorted(set(managed) - known))
         checks.append(
@@ -339,12 +356,13 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
     elif command == "version":
         output.emit(command, {"version": __version__}, f"vulndockyard {__version__}")
     elif command == "doctor":
-        result = _doctor(runtime.paths)
+        hosts_manager = HostsManager()
+        result = _doctor(runtime.paths, hosts_manager)
         stale_check = next(check for check in result["checks"] if check["name"] == "managed-hosts")
         stale_detail = stale_check["detail"]
         if args.repair_hosts and isinstance(stale_detail, dict) and stale_detail["stale"]:
-            _apply_hostnames(HostsManager(), tuple(stale_detail["stale"]), add=False, yes=args.yes)
-            result = _doctor(runtime.paths)
+            _apply_hostnames(hosts_manager, tuple(stale_detail["stale"]), add=False, yes=args.yes)
+            result = _doctor(runtime.paths, hosts_manager)
         human = "\n".join(
             f"{'PASS' if check['ok'] else ('FAIL' if check['required'] else 'WARN')} "
             f"{check['name']}: {check['detail']}"
@@ -423,10 +441,8 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
             unsafe_development=args.unsafe_development,
         )
         output.emit("up", _status_data(status), _human_status(status))
-        if sys.stdin.isatty() and not output.json_mode:
-            manager = HostsManager()
-            if lab.manifest.friendly_hostname not in parse_managed_hosts(manager.path.read_bytes()):
-                print(f"Optional friendly name: vulndockyard hosts add {lab.manifest.id}")
+        if sys.stdin.isatty() and sys.stdout.isatty() and not output.json_mode:
+            _offer_friendly_hosts(lab)
     elif command == "status":
         labs = (catalogue.get(args.lab),) if args.lab else catalogue.all()
         statuses = [_status_data(runtime.status(lab)) for lab in labs]
@@ -489,8 +505,8 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
                 lab for lab in catalogue.all() if lab.manifest.adapter_status.value == "runnable"
             )
         )
-        checks = [check_latest(lab) for lab in labs]
         if args.check:
+            checks = [check_latest(lab) for lab in labs]
             output.emit(
                 command,
                 [dataclasses.asdict(value) for value in checks],
@@ -501,18 +517,34 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
                 ),
             )
         else:
-            results = [
-                apply_reviewed_update(lab, check) for lab, check in zip(labs, checks, strict=True)
-            ]
+            results = [apply_reviewed_update(lab, runtime, discover=check_latest) for lab in labs]
             output.emit(
                 command,
-                {"results": results},
+                {"results": [dataclasses.asdict(result) for result in results]},
                 "\n".join(
-                    f"{lab.manifest.id}: {result}"
+                    f"{lab.manifest.id}: {result.outcome}"
                     for lab, result in zip(labs, results, strict=True)
                 ),
             )
     elif command == "hosts":
+        if args.hosts_command == "helper":
+            helper = packaged_helper()
+            helper_value = {
+                "packaged_path": str(helper),
+                "sha256": HELPER_SHA256,
+                "install_paths": tuple(str(path) for path in HELPER_PATHS),
+                "required_owner": "root:root",
+                "required_mode": "0755",
+            }
+            output.emit(
+                command,
+                helper_value,
+                (
+                    f"Packaged helper: {helper}\nSHA-256: {HELPER_SHA256}\n"
+                    f"Install as root: {HELPER_PATHS[0]} (root:root, mode 0755)"
+                ),
+            )
+            return
         labs = _host_labs(catalogue, args.lab)
         host_value = _apply_hosts(labs, add=args.hosts_command == "add", yes=args.yes)
         hostnames = ", ".join(str(item) for item in host_value["hostnames"])
@@ -579,6 +611,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         command = next((value for value in values if not value.startswith("-")), "unknown")
         output.error(command, str(exc), int(exc.exit_code))
         return int(exc.exit_code)
+    except Exception as exc:  # A stable boundary for unexpected platform/runtime failures.
+        command = next((value for value in values if not value.startswith("-")), "unknown")
+        output.error(
+            command,
+            f"unexpected controller failure ({type(exc).__name__})",
+            int(ExitCode.RUNTIME),
+        )
+        return int(ExitCode.RUNTIME)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,130 @@
+#!/usr/bin/python3 -I
+"""Root-owned narrow /etc/hosts editor for VulnDockyard protocol 1."""
+
+import contextlib
+import os
+import re
+import stat
+import sys
+import tempfile
+
+BEGIN = b"# BEGIN VULNDOCKYARD MANAGED BLOCK\n"
+END = b"# END VULNDOCKYARD MANAGED BLOCK\n"
+INSERTED_SEPARATOR = b"# VULNDOCKYARD INSERTED NEWLINE\n"
+HOSTNAME = re.compile(rb"^[a-z][a-z0-9-]{0,61}\.test$")
+HOSTS = "/etc/hosts"
+
+
+def fail(message):
+    print(f"Error: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def bounds(content):
+    if content.count(BEGIN) != content.count(END) or content.count(BEGIN) > 1:
+        fail("hosts file contains ambiguous VulnDockyard markers")
+    if BEGIN not in content:
+        return None
+    start = content.index(BEGIN)
+    return start, content.index(END, start) + len(END)
+
+
+def parse(content):
+    region = bounds(content)
+    if region is None:
+        return ()
+    result = []
+    lines = content[region[0] : region[1]].splitlines()[1:-1]
+    if lines and lines[0] == INSERTED_SEPARATOR.rstrip(b"\n"):
+        lines = lines[1:]
+    for line in lines:
+        fields = line.split()
+        if len(fields) != 2 or fields[0] != b"127.0.0.1" or not HOSTNAME.fullmatch(fields[1]):
+            fail("hosts file contains a malformed VulnDockyard entry")
+        result.append(fields[1])
+    if len(result) != len(set(result)):
+        fail("hosts file contains duplicate VulnDockyard entries")
+    return tuple(result)
+
+
+def transform(content, values):
+    region = bounds(content)
+    inserted_separator = False
+    if region is not None:
+        parse(content)
+        inserted_separator = INSERTED_SEPARATOR in content[region[0] : region[1]]
+    elif content and not content.endswith(b"\n"):
+        inserted_separator = True
+    block = b""
+    if values:
+        block = (
+            BEGIN
+            + (INSERTED_SEPARATOR if inserted_separator else b"")
+            + b"".join(b"127.0.0.1\t" + value + b"\n" for value in values)
+            + END
+        )
+    if region is None:
+        separator = b"" if not content or content.endswith(b"\n") else b"\n"
+        return content + separator + block
+    before = content[: region[0]]
+    if not block and inserted_separator:
+        if not before.endswith(b"\n"):
+            fail("managed hosts separator metadata is inconsistent")
+        before = before[:-1]
+    return before + block + content[region[1] :]
+
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] not in {"add", "remove"}:
+        fail("usage: vulndockyard-hosts {add|remove} LAB.test")
+    hostname = os.fsencode(sys.argv[2])
+    if not HOSTNAME.fullmatch(hostname):
+        fail("hostname must be a lowercase .test name")
+    if os.geteuid() != 0:
+        fail("helper must run as root")
+    info = os.lstat(HOSTS)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail("/etc/hosts must be a regular non-symlink file")
+    if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail("/etc/hosts has unsafe ownership or mode")
+    with open(HOSTS, "rb") as handle:
+        content = handle.read(2_000_001)
+    if len(content) > 2_000_000 or b"\x00" in content:
+        fail("/etc/hosts is too large or contains a NUL byte")
+    values = set(parse(content))
+    if sys.argv[1] == "add":
+        values.add(hostname)
+    else:
+        values.discard(hostname)
+    expected = tuple(sorted(values))
+    updated = transform(content, expected)
+    if updated == content:
+        return 0
+    descriptor, temporary = tempfile.mkstemp(prefix=".vulndockyard-hosts-", dir="/etc")
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(updated)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, stat.S_IMODE(info.st_mode))
+        os.chown(temporary, info.st_uid, info.st_gid)
+        with open(temporary, "rb") as handle:
+            if parse(handle.read()) != expected:
+                fail("temporary hosts file failed validation")
+        os.replace(temporary, HOSTS)
+        directory = os.open("/etc", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except OSError as error:
+        fail(f"hosts update failed: {error.strerror or type(error).__name__}")

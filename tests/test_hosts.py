@@ -17,12 +17,26 @@ def test_add_remove_round_trip_preserves_unrelated_bytes() -> None:
     assert transform_hosts(added, ()) == original
 
 
+def test_add_remove_round_trip_preserves_missing_final_newline() -> None:
+    original = b"127.0.0.1 localhost\n# unrelated final line"
+    added = transform_hosts(original, ("juice-shop.test",))
+    assert b"# VULNDOCKYARD INSERTED NEWLINE\n" in added
+    assert parse_managed_hosts(added) == ("juice-shop.test",)
+    assert transform_hosts(added, ()) == original
+
+
 def test_transform_is_idempotent_and_sorted() -> None:
     original = b"127.0.0.1 localhost\n"
     once = transform_hosts(original, ("webgoat.test", "juice-shop.test"))
     twice = transform_hosts(once, ("juice-shop.test", "webgoat.test"))
     assert once == twice
     assert parse_managed_hosts(once) == ("juice-shop.test", "webgoat.test")
+
+
+@pytest.mark.parametrize("hostname", ("UPPER.test", "escape.test.example", "-bad.test"))
+def test_transform_rejects_unsafe_hostname(hostname: str) -> None:
+    with pytest.raises(IntegrityError, match="lowercase"):
+        transform_hosts(b"127.0.0.1 localhost\n", (hostname,))
 
 
 @pytest.mark.parametrize(
@@ -66,3 +80,14 @@ def test_manager_rejects_symlink_and_unsafe_mode(tmp_path: Path) -> None:
     link.chmod(0o666)
     with pytest.raises(PolicyError, match="world-writable"):
         HostsManager(link).preview("juice-shop.test", add=True)
+
+
+def test_manager_rejects_oversized_and_nul_content(tmp_path: Path) -> None:
+    path = tmp_path / "hosts"
+    path.write_bytes(b"x" * 2_000_001)
+    path.chmod(0o600)
+    with pytest.raises(PolicyError, match="2 MB"):
+        HostsManager(path).preview("juice-shop.test", add=True)
+    path.write_bytes(b"127.0.0.1 localhost\n\x00")
+    with pytest.raises(IntegrityError, match="NUL"):
+        HostsManager(path).preview("juice-shop.test", add=True)

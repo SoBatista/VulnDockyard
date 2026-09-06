@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-label='label=org.vulndockyard.managed=true'
-containers="$(docker container ls --all --quiet --filter "${label}")"
-networks="$(docker network ls --quiet --filter "${label}")"
-volumes="$(docker volume ls --quiet --filter "${label}")"
-
-if [[ -n "${containers}" || -n "${networks}" || -n "${volumes}" ]]; then
-  printf 'Residual VulnDockyard resources detected.\ncontainers=%s\nnetworks=%s\nvolumes=%s\n' \
-    "${containers}" "${networks}" "${volumes}" >&2
-  exit 1
+python_command="${VDY_PYTHON:-}"
+if [[ -z "${python_command}" ]]; then
+  if [[ -x .venv/bin/python ]]; then
+    python_command='.venv/bin/python'
+  else
+    python_command='python3'
+  fi
 fi
 
-printf 'No managed containers, networks, or volumes remain.\n'
+exec "${python_command}" scripts/docker_gate.py audit

@@ -11,9 +11,9 @@ import pytest
 import vulndockyard.cli as cli
 from vulndockyard.catalogue import ReviewedLab
 from vulndockyard.errors import CancelledError
-from vulndockyard.hosts import HostsManager
+from vulndockyard.hosts import HostsManager, parse_managed_hosts
 from vulndockyard.paths import Paths
-from vulndockyard.runtime import RuntimeStatus
+from vulndockyard.runtime import RuntimeStatus, RuntimeUpdate
 from vulndockyard.updates import UpdateCheck
 
 
@@ -23,7 +23,7 @@ def status(lab: ReviewedLab, state: str = "running") -> RuntimeStatus:
         state,
         f"http://{lab.manifest.friendly_hostname}",
         "a" * 32 if state != "absent" else "",
-        "example/app@sha256:" + "b" * 64 if state != "absent" else "",
+        "registry.example.test/app@sha256:" + "b" * 64 if state != "absent" else "",
         "sha256:" + "b" * 64 if state != "absent" else "",
         lab.manifest.trust.value,
         state != "absent",
@@ -71,6 +71,18 @@ class FakeRuntime:
 
     def verify(self, lab: ReviewedLab) -> RuntimeStatus:
         return status(lab)
+
+    def activate_reviewed_update(self, lab: ReviewedLab) -> RuntimeUpdate:
+        current = status(lab)
+        return RuntimeUpdate(
+            lab.manifest.id,
+            "already-current",
+            lab.manifest_identity,
+            lab.manifest_identity,
+            current.run_id,
+            current.run_id,
+            current,
+        )
 
 
 @pytest.fixture
@@ -168,6 +180,34 @@ def test_stable_error_codes_and_json_errors(
     assert cli.main(["up", "bwapp"]) == 0  # fake dispatcher proves parsing only
 
 
+def test_unexpected_error_has_stable_non_disclosing_json(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        FakeRuntime,
+        "pull",
+        lambda self, lab: (_ for _ in ()).throw(OSError("/private/operator/path")),
+    )
+    assert cli.main(["--json", "pull", "juice-shop"]) == 6
+    error = json.loads(capsys.readouterr().err)
+    assert error["error"]["code"] == 6
+    assert error["error"]["message"] == "unexpected controller failure (OSError)"
+
+
+def test_hosts_helper_metadata_does_not_elevate(
+    isolated_cli: type[FakeRuntime], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["--json", "hosts", "helper"]) == 0
+    value = json.loads(capsys.readouterr().out)["data"]
+    assert value["sha256"] == cli.HELPER_SHA256
+    assert value["install_paths"] == [
+        "/usr/local/libexec/vulndockyard-hosts",
+        "/usr/libexec/vulndockyard-hosts",
+    ]
+
+
 def test_destructive_command_requires_confirmation_noninteractively(
     isolated_cli: type[FakeRuntime], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -191,6 +231,20 @@ def test_update_check_and_noop_apply(
     assert "current" in capsys.readouterr().out
     assert cli.main(["update", "juice-shop"]) == 0
     assert "already-current" in capsys.readouterr().out
+
+
+def test_update_refuses_discovery_without_an_installed_reviewed_candidate(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "check_latest",
+        lambda lab: UpdateCheck(lab.manifest.id, "v20.2.0", "v20.3.0", True),
+    )
+    assert cli.main(["update", "juice-shop"]) == 4
+    assert "no reviewed immutable lock" in capsys.readouterr().err
 
 
 class FixtureHostsManager(HostsManager):
@@ -284,6 +338,30 @@ def test_doctor_advisory_failures_do_not_fail(
     assert "WARN loopback-port-80" in captured.out
 
 
+def test_doctor_repairs_only_stale_managed_hosts(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "hosts"
+    original = b"127.0.0.1 localhost\n# unrelated\n"
+    path.write_bytes(original)
+    path.chmod(0o644)
+    manager = HostsManager(path)
+    manager.apply("juice-shop.test", add=True)
+    manager.apply("removed-lab.test", add=True)
+    FixtureHostsManager.fixture_path = path
+    monkeypatch.setattr(cli, "HostsManager", FixtureHostsManager)
+    monkeypatch.setattr(cli, "Docker", DoctorDocker)
+    monkeypatch.setattr(cli, "port_available", lambda port: True)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    assert cli.main(["doctor", "--repair-hosts", "--yes"]) == 0
+    assert manager.preview("juice-shop.test", add=True).before == ("juice-shop.test",)
+    assert b"# unrelated\n" in path.read_bytes()
+    assert "PASS managed-hosts" in capsys.readouterr().out
+
+
 def test_direct_confirmation_interactive_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
@@ -292,6 +370,69 @@ def test_direct_confirmation_interactive_paths(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr("builtins.input", lambda prompt: "no")
     with pytest.raises(CancelledError, match="cancelled"):
         cli._confirm("continue", yes=False)
+
+
+def test_optional_hosts_offer_decline_is_non_destructive(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "hosts"
+    original = b"127.0.0.1 localhost\n"
+    path.write_bytes(original)
+    path.chmod(0o644)
+    FixtureHostsManager.fixture_path = path
+    monkeypatch.setattr(cli, "HostsManager", FixtureHostsManager)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "no")
+
+    assert cli.main(["up", "juice-shop", "--port", "18080"]) == 0
+    assert path.read_bytes() == original
+    captured = capsys.readouterr()
+    assert "Add it now?" not in captured.out  # input() prompts are replaced by the fixture.
+    assert "Skipped. Add it later" in captured.out
+
+
+def test_optional_hosts_offer_accepts_and_applies_exact_entry(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "hosts"
+    original = b"127.0.0.1 localhost\n# unrelated\n"
+    path.write_bytes(original)
+    path.chmod(0o644)
+    FixtureHostsManager.fixture_path = path
+    monkeypatch.setattr(cli, "HostsManager", FixtureHostsManager)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "yes")
+
+    assert cli.main(["up", "juice-shop", "--port", "18080"]) == 0
+    assert parse_managed_hosts(path.read_bytes()) == ("juice-shop.test",)
+    assert b"# unrelated\n" in path.read_bytes()
+    assert "Friendly hostname juice-shop.test: added" in capsys.readouterr().out
+
+
+def test_optional_hosts_offer_cannot_turn_a_successful_start_into_failure(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class UnreadableHosts:
+        def preview(self, hostname: str, *, add: bool) -> object:
+            raise OSError("synthetic unreadable hosts")
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "HostsManager", UnreadableHosts)
+    assert cli.main(["up", "juice-shop", "--port", "18080"]) == 0
+    captured = capsys.readouterr()
+    assert "juice-shop: running" in captured.out
+    assert "could not inspect optional hosts entry" in captured.err
 
 
 def test_main_catches_interrupt_and_domain_error(

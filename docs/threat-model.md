@@ -25,6 +25,8 @@ visitor; containment must assume that outcome.
   prefix-only deletion exists.
 - Hosts editing uses an exact block, regular-file/owner/mode checks, a same-directory
   temporary, validation, atomic replacement, and preservation of unrelated bytes.
+  Elevation executes only a fixed root-owned, non-writable, checksum-matched helper;
+  user-writable virtual-environment and project Python code never runs as root.
 - Provider downloads require pinned commit and archive checksum; extraction rejects
   traversal, links, devices, duplicates, and resource bombs.
 
@@ -40,4 +42,3 @@ can outlive server reset. Users must not add real credentials to labs.
 Out of scope: protecting a hostile host administrator, making the training apps
 production-safe, preventing every local browser-origin interaction, or claiming
 publisher identity from a digest alone.
-

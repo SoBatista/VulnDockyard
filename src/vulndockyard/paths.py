@@ -13,7 +13,10 @@ from .errors import IntegrityError
 
 def _xdg(env_name: str, fallback: Path) -> Path:
     value = os.environ.get(env_name)
-    return Path(value).expanduser() if value else fallback
+    selected = Path(value).expanduser() if value else fallback
+    if not selected.is_absolute():
+        raise IntegrityError(f"{env_name} must be an absolute path")
+    return selected
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,8 @@ class Paths:
 
     def ensure(self) -> None:
         for path in (self.cache, self.state, self.config, self.data):
+            if path.is_symlink():
+                raise IntegrityError(f"refusing symlinked XDG ownership root: {path}")
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
             path.chmod(0o700)
 

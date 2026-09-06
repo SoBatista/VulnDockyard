@@ -10,6 +10,18 @@ from typing import Any, TextIO
 JSON_SCHEMA_VERSION = 1
 
 
+def terminal_safe(value: str) -> str:
+    """Escape terminal controls while retaining ordinary text, tabs, and line breaks."""
+    pieces: list[str] = []
+    for character in value:
+        if character in {"\n", "\t"} or character.isprintable():
+            pieces.append(character)
+        else:
+            codepoint = ord(character)
+            pieces.append(f"\\x{codepoint:02x}" if codepoint <= 0xFF else f"\\u{codepoint:04x}")
+    return "".join(pieces)
+
+
 @dataclass
 class Output:
     json_mode: bool = False
@@ -21,7 +33,7 @@ class Output:
             document = {"schema_version": JSON_SCHEMA_VERSION, "command": command, "data": data}
             print(json.dumps(document, sort_keys=True, separators=(",", ":")), file=self.stream)
         elif human:
-            print(human, file=self.stream)
+            print(terminal_safe(human), file=self.stream)
 
     def error(self, command: str, message: str, code: int) -> None:
         if self.json_mode:
@@ -34,4 +46,4 @@ class Output:
                 json.dumps(document, sort_keys=True, separators=(",", ":")), file=self.error_stream
             )
         else:
-            print(f"Error: {message}", file=self.error_stream)
+            print(f"Error: {terminal_safe(message)}", file=self.error_stream)

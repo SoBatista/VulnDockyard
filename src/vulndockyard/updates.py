@@ -3,18 +3,36 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Protocol, Self
+from typing import TYPE_CHECKING, Protocol, Self
 from urllib.parse import urlparse
 
 from .catalogue import ReviewedLab
 from .errors import IntegrityError, PolicyError, PreflightError
+from .jsonio import StrictJSONError, strict_json_loads
+
+if TYPE_CHECKING:
+    from .runtime import RuntimeUpdate
 
 SEMVER_TAG = re.compile(r"^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        file_pointer: object,
+        code: int,
+        message: str,
+        headers: object,
+        new_url: str,
+    ) -> urllib.request.Request | None:
+        return None
 
 
 @dataclass(frozen=True)
@@ -52,7 +70,8 @@ class ReleaseResponse(Protocol):
 
 
 def _open_release(request: urllib.request.Request, *, timeout: float) -> ReleaseResponse:
-    return urllib.request.urlopen(request, timeout=timeout)  # type: ignore[no-any-return]  # noqa: S310
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    return opener.open(request, timeout=timeout)  # type: ignore[no-any-return]
 
 
 def check_latest(
@@ -61,6 +80,8 @@ def check_latest(
     opener: ReleaseOpener = _open_release,
     timeout: float = 10,
 ) -> UpdateCheck:
+    if not math.isfinite(timeout) or not 1 <= timeout <= 60:
+        raise PolicyError("release discovery timeout must be between 1 and 60 seconds")
     repository = urlparse(str(lab.manifest.raw["upstream"]["repository"]))
     parts = repository.path.strip("/").removesuffix(".git").split("/")
     current = str(lab.manifest.raw["version"]["tag"])
@@ -69,7 +90,7 @@ def check_latest(
             "automated release discovery is available only for canonical GitHub repositories"
         )
     url = f"https://api.github.com/repos/{parts[0]}/{parts[1]}/releases/latest"
-    request = urllib.request.Request(  # noqa: S310 - URL is canonical GitHub HTTPS only
+    request = urllib.request.Request(
         url,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "VulnDockyard/1"},
     )
@@ -82,9 +103,9 @@ def check_latest(
     if len(payload) > 131_072:
         raise IntegrityError("upstream release response exceeded 128 KiB")
     try:
-        value = json.loads(payload)
+        value = strict_json_loads(payload)
         latest = value["tag_name"]
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+    except (json.JSONDecodeError, StrictJSONError, KeyError, TypeError) as exc:
         raise IntegrityError("upstream release response is malformed") from exc
     if not isinstance(latest, str):
         raise IntegrityError("upstream release tag is malformed")
@@ -111,11 +132,28 @@ def transactional_replace(transaction: Transaction) -> None:
         raise
 
 
-def apply_reviewed_update(lab: ReviewedLab, update: UpdateCheck) -> str:
+class UpdateRuntime(Protocol):
+    def activate_reviewed_update(self, lab: ReviewedLab) -> RuntimeUpdate: ...
+
+
+class UpdateDiscovery(Protocol):
+    def __call__(self, lab: ReviewedLab) -> UpdateCheck: ...
+
+
+def apply_reviewed_update(
+    lab: ReviewedLab,
+    runtime: UpdateRuntime,
+    *,
+    discover: UpdateDiscovery = check_latest,
+) -> RuntimeUpdate:
+    candidate = runtime.activate_reviewed_update(lab)
+    if candidate.outcome == "activated":
+        return candidate
+    update = discover(lab)
     if update.lab_id != lab.manifest.id:
         raise IntegrityError("update candidate does not match the selected lab")
     if not update.update_available:
-        return "already-current"
+        return candidate
     raise PolicyError(
         f"{update.available} is discoverable but has no reviewed immutable lock in this release; "
         "the current known-good deployment was preserved"

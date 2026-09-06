@@ -19,13 +19,18 @@ reviewed multi-container adapters and provider development.
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e .
+python -m pip install --require-hashes -r requirements-dev.lock
+python -m pip install --no-deps --no-build-isolation -e .
 vulndockyard doctor
 vulndockyard list
 vulndockyard trust juice-shop
 vulndockyard pull juice-shop
 vulndockyard up juice-shop
-sudo -- .venv/bin/vulndockyard hosts add juice-shop --yes
+vulndockyard hosts helper
+# Inspect and checksum the displayed helper, then install it once with:
+sudo /usr/bin/install -o root -g root -m 0755 DISPLAYED_HELPER \
+  /usr/local/libexec/vulndockyard-hosts
+vulndockyard hosts add juice-shop --yes
 vulndockyard open juice-shop
 vulndockyard reset juice-shop --yes
 vulndockyard remove juice-shop --yes
@@ -36,6 +41,12 @@ Port 80 is deliberate: the reviewed gateway publishes only
 application remains unpublished on its internal Docker network. If port 80 is
 busy, choose a fallback explicitly with `--port`; VulnDockyard never silently
 changes the interface or port.
+
+Never run a virtual-environment or editable-install Python entry point with
+`sudo`. Hosts changes cross a deliberately narrow privilege boundary: the CLI
+will invoke only a root-owned, non-writable helper whose exact SHA-256 matches
+this controller release. `vulndockyard hosts helper` reports the packaged source,
+required checksum, and fixed installation location for inspection.
 
 For a standalone release install, download a release wheel and its checksum,
 verify the checksum as described in [release verification](docs/release.md),

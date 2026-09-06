@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
 import re
 import shutil
+import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 from .errors import IntegrityError, PolicyError, PreflightError
+from .models import DIGEST, OCI_NAME
 from .process import Result, Runner
 from .state import ResourceRecord, RunState
 
@@ -20,7 +27,94 @@ RUN = "org.vulndockyard.run-id"
 CREATED = "org.vulndockyard.created-at"
 TRUSTED = "org.vulndockyard.trusted"
 ROLE = "org.vulndockyard.role"
-OBJECT_ID = re.compile(r"^[0-9a-f]{12,64}$")
+OBJECT_ID = re.compile(r"^[0-9a-f]{64}$")
+RESOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def parse_image_reference(reference: str) -> tuple[str, str]:
+    parts = reference.rsplit("@", 1)
+    if (
+        len(parts) != 2
+        or OCI_NAME.fullmatch(parts[0]) is None
+        or DIGEST.fullmatch(parts[1]) is None
+    ):
+        raise PolicyError(
+            "Docker image references require a canonical fully-qualified OCI name "
+            "and immutable sha256 digest"
+        )
+    return parts[0], parts[1]
+
+
+@dataclass(frozen=True)
+class DockerConnection:
+    executable: str
+    socket: Path
+
+    @classmethod
+    def discover(cls, environment: Mapping[str, str] | None = None) -> DockerConnection:
+        values = os.environ if environment is None else environment
+        executable = shutil.which("docker", path=values.get("PATH"))
+        if executable is None:
+            raise PreflightError("Docker CLI is not installed")
+        executable_path = Path(executable).resolve(strict=True)
+        executable_stat = executable_path.stat()
+        if not stat.S_ISREG(executable_stat.st_mode) or not os.access(executable_path, os.X_OK):
+            raise PreflightError("Docker CLI is not a regular executable")
+        if executable_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise PreflightError("Docker CLI must not be group- or world-writable")
+
+        context = values.get("DOCKER_CONTEXT", "")
+        if context not in {"", "default"}:
+            raise PreflightError("only the local default Docker context is supported")
+        configured = values.get("VDY_DOCKER_SOCKET")
+        docker_host = values.get("DOCKER_HOST")
+        if configured and docker_host:
+            raise PreflightError("set only one of VDY_DOCKER_SOCKET or DOCKER_HOST")
+        if configured:
+            socket_path = Path(configured)
+        elif docker_host:
+            parsed = urlsplit(docker_host)
+            if (
+                parsed.scheme != "unix"
+                or parsed.netloc
+                or parsed.query
+                or parsed.fragment
+                or not parsed.path
+                or "%" in parsed.path
+            ):
+                raise PreflightError("DOCKER_HOST must identify an absolute local Unix socket")
+            socket_path = Path(parsed.path)
+        else:
+            candidates = [Path("/var/run/docker.sock")]
+            runtime_dir = values.get("XDG_RUNTIME_DIR")
+            if runtime_dir and Path(runtime_dir).is_absolute():
+                candidates.append(Path(runtime_dir) / "docker.sock")
+            socket_path = next((item for item in candidates if item.exists()), candidates[0])
+        if not socket_path.is_absolute():
+            raise PreflightError("Docker socket path must be absolute")
+        if socket_path.is_symlink():
+            raise PreflightError("Docker socket must not be a symlink")
+        try:
+            resolved_socket = socket_path.resolve(strict=True)
+            socket_stat = resolved_socket.stat()
+        except OSError as exc:
+            raise PreflightError(f"Docker Unix socket is unavailable: {socket_path}") from exc
+        if not stat.S_ISSOCK(socket_stat.st_mode):
+            raise PreflightError(f"Docker endpoint is not a Unix socket: {socket_path}")
+        if socket_stat.st_uid not in {0, os.getuid(), executable_stat.st_uid}:
+            raise PreflightError("Docker Unix socket has an unexpected owner")
+        if socket_stat.st_mode & stat.S_IWOTH:
+            raise PreflightError("Docker Unix socket must not be world-writable")
+        return cls(str(executable_path), resolved_socket)
+
+    def environment(self) -> dict[str, str]:
+        return {
+            "DOCKER_CLI_HINTS": "false",
+            "DOCKER_HOST": f"unix://{self.socket}",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        }
 
 
 @dataclass(frozen=True)
@@ -31,6 +125,33 @@ class Timeouts:
     stop: float = 30
     cleanup: float = 60
     inspect: float = 15
+
+    @classmethod
+    def discover(cls, environment: Mapping[str, str] | None = None) -> Timeouts:
+        values = os.environ if environment is None else environment
+        bounds = {
+            "pull": (1.0, 3600.0),
+            "start": (1.0, 300.0),
+            "health": (1.0, 900.0),
+            "stop": (1.0, 300.0),
+            "cleanup": (1.0, 600.0),
+            "inspect": (1.0, 120.0),
+        }
+        defaults = cls()
+        resolved: dict[str, float] = {}
+        for name, (minimum, maximum) in bounds.items():
+            raw = values.get(f"VDY_TIMEOUT_{name.upper()}", str(getattr(defaults, name)))
+            try:
+                parsed = float(raw)
+            except ValueError as exc:
+                raise PreflightError(f"VDY_TIMEOUT_{name.upper()} must be numeric") from exc
+            if not minimum <= parsed <= maximum:
+                raise PreflightError(
+                    f"VDY_TIMEOUT_{name.upper()} must be between "
+                    f"{minimum:g} and {maximum:g} seconds"
+                )
+            resolved[name] = parsed
+        return cls(**resolved)
 
 
 @dataclass(frozen=True)
@@ -65,16 +186,48 @@ class Ownership:
 
 
 class Docker:
-    def __init__(self, runner: Runner | None = None, timeouts: Timeouts | None = None) -> None:
+    def __init__(
+        self,
+        runner: Runner | None = None,
+        timeouts: Timeouts | None = None,
+        *,
+        connection: DockerConnection | None = None,
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
         self.runner = runner or Runner()
-        self.timeouts = timeouts or Timeouts()
+        self._environment = dict(os.environ if environment is None else environment)
+        self.timeouts = timeouts or Timeouts.discover(self._environment)
+        self._connection = connection
+
+    @property
+    def connection(self) -> DockerConnection:
+        if self._connection is None:
+            self._connection = DockerConnection.discover(self._environment)
+        return self._connection
 
     def _run(self, args: tuple[str, ...], *, timeout: float, check: bool = True) -> Result:
-        return self.runner.run(("docker", *args), timeout=timeout, check=check)
+        connection = self.connection
+        return self.runner.run(
+            (connection.executable, "--host", f"unix://{connection.socket}", *args),
+            timeout=timeout,
+            check=check,
+            env=connection.environment(),
+        )
 
     def preflight(self, *, require_compose: bool = False) -> dict[str, object]:
-        if shutil.which("docker") is None:
-            raise PreflightError("Docker CLI is not installed")
+        system = platform.system().casefold()
+        machine = platform.machine().casefold()
+        architectures = {
+            "x86_64": "linux/amd64",
+            "amd64": "linux/amd64",
+            "aarch64": "linux/arm64",
+            "arm64": "linux/arm64",
+            "armv7": "linux/arm/v7",
+            "armv7l": "linux/arm/v7",
+        }
+        if system != "linux" or machine not in architectures:
+            raise PreflightError(f"unsupported local Docker platform: {system}/{machine}")
+        local_platform = architectures[machine]
         engine = self._run(
             ("info", "--format", "{{json .ServerVersion}}"), timeout=self.timeouts.inspect
         )
@@ -84,7 +237,11 @@ class Docker:
         compose = compose_result.returncode == 0
         if require_compose and not compose:
             raise PreflightError("Docker Compose v2 is required for this operation")
-        return {"engine": json.loads(engine.stdout), "compose_v2": compose}
+        return {
+            "engine": json.loads(engine.stdout),
+            "compose_v2": compose,
+            "platform": local_platform,
+        }
 
     def inspect(self, kind: str, object_id: str) -> dict[str, Any]:
         if kind not in {"container", "network", "volume", "image"}:
@@ -123,12 +280,19 @@ class Docker:
     def validate_owned(self, record: ResourceRecord, ownership: Ownership) -> dict[str, Any]:
         if record.kind not in {"container", "network", "volume"}:
             raise IntegrityError(f"unknown recorded resource kind: {record.kind}")
-        if not OBJECT_ID.fullmatch(record.object_id):
+        expected_role = expected_resource_role(record, ownership)
+        if record.kind != "volume" and not OBJECT_ID.fullmatch(record.object_id):
             raise IntegrityError("recorded Docker object ID is malformed")
+        if record.kind == "volume" and record.object_id != record.name:
+            raise IntegrityError("recorded Docker volume identity is malformed")
         inspection = self.inspect(record.kind, record.object_id)
         actual_id = inspection.get("Id", inspection.get("ID", inspection.get("Name")))
-        if not isinstance(actual_id, str) or not actual_id.startswith(record.object_id):
+        if not isinstance(actual_id, str) or actual_id != record.object_id:
             raise IntegrityError(f"recorded {record.kind} identity no longer matches")
+        raw_name = inspection.get("Name")
+        actual_name = raw_name.removeprefix("/") if isinstance(raw_name, str) else None
+        if actual_name != record.name:
+            raise PolicyError(f"refusing {record.kind} {record.name}: resource name mismatch")
         labels = self._labels(record.kind, inspection)
         expected = {
             OWNER: "true",
@@ -138,6 +302,7 @@ class Docker:
             RUN: ownership.run_id,
             CREATED: ownership.created_at,
             TRUSTED: str(ownership.trusted).lower(),
+            ROLE: expected_role,
         }
         differences = [key for key, value in expected.items() if labels.get(key) != value]
         if differences:
@@ -148,12 +313,10 @@ class Docker:
         return inspection
 
     def pull(self, reference: str) -> None:
-        if "@sha256:" not in reference:
-            raise PolicyError("Docker pulls require an immutable digest reference")
+        requested_name, requested_digest = parse_image_reference(reference)
         self._run(("image", "pull", reference), timeout=self.timeouts.pull)
         inspection = self.inspect("image", reference)
         digests = inspection.get("RepoDigests", [])
-        requested_name, requested_digest = reference.rsplit("@", 1)
 
         def normalized(name: str) -> str:
             name = name.removeprefix("docker.io/")
@@ -200,6 +363,7 @@ class Docker:
         pids: int,
         read_only: bool,
     ) -> ResourceRecord:
+        parse_image_reference(image)
         args = [
             "container",
             "create",
@@ -211,11 +375,19 @@ class Docker:
             "app",
             "--restart",
             "no",
+            "--log-driver",
+            "local",
+            "--log-opt",
+            "max-size=10m",
+            "--log-opt",
+            "max-file=2",
             "--security-opt",
             "no-new-privileges=true",
             "--cap-drop",
             "ALL",
             "--memory",
+            f"{memory_mb}m",
+            "--memory-swap",
             f"{memory_mb}m",
             "--cpus",
             f"{cpus:g}",
@@ -244,7 +416,12 @@ class Docker:
         host_port: int,
         ownership: Ownership,
     ) -> ResourceRecord:
-        if not 1 <= host_port <= 65535:
+        parse_image_reference(image)
+        if (
+            not isinstance(host_port, int)
+            or isinstance(host_port, bool)
+            or not 1 <= host_port <= 65535
+        ):
             raise PolicyError("host port is outside the valid range")
         args = (
             "container",
@@ -255,13 +432,21 @@ class Docker:
             network,
             "--restart",
             "no",
+            "--log-driver",
+            "local",
+            "--log-opt",
+            "max-size=10m",
+            "--log-opt",
+            "max-file=2",
             "--publish",
             f"127.0.0.1:{host_port}:8080",
+            "--user",
+            "1000:1000",
             "--read-only",
             "--tmpfs",
-            "/config:rw,noexec,nosuid,nodev,size=8m",
+            "/config:rw,noexec,nosuid,nodev,size=8m,uid=1000,gid=1000,mode=0700",
             "--tmpfs",
-            "/data:rw,noexec,nosuid,nodev,size=8m",
+            "/data:rw,noexec,nosuid,nodev,size=8m,uid=1000,gid=1000,mode=0700",
             "--security-opt",
             "no-new-privileges=true",
             "--cap-drop",
@@ -269,6 +454,8 @@ class Docker:
             "--cap-add",
             "NET_BIND_SERVICE",
             "--memory",
+            "128m",
+            "--memory-swap",
             "128m",
             "--cpus",
             "0.25",
@@ -332,24 +519,43 @@ class Docker:
         return self._run(tuple(args), timeout=300, check=False)
 
     def remove_image(self, reference: str) -> None:
-        if "@sha256:" not in reference:
-            raise PolicyError("image cleanup requires an immutable digest reference")
+        parse_image_reference(reference)
         self._run(("image", "rm", reference), timeout=self.timeouts.cleanup)
 
-    def managed_resources(self) -> dict[str, tuple[str, ...]]:
+    def managed_resources(self, lab_id: str | None = None) -> dict[str, tuple[str, ...]]:
+        if lab_id is not None and not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", lab_id):
+            raise ValueError("invalid lab ID filter")
         result: dict[str, tuple[str, ...]] = {}
         for kind in ("container", "network", "volume"):
             noun = "container" if kind == "container" else kind
-            query: tuple[str, ...] = (
-                noun,
-                "ls",
-                "--all",
-                "--quiet",
-                "--filter",
-                f"label={OWNER}=true",
-            )
-            if kind != "container":
-                query = (noun, "ls", "--quiet", "--filter", f"label={OWNER}=true")
-            response = self._run(query, timeout=self.timeouts.inspect)
-            result[kind] = tuple(line for line in response.stdout.splitlines() if line)
+            query = [noun, "ls"]
+            if kind == "container":
+                query.append("--all")
+            if kind != "volume":
+                query.append("--no-trunc")
+            query.extend(("--quiet", "--filter", f"label={OWNER}=true"))
+            if lab_id is not None:
+                query.extend(("--filter", f"label={LAB}={lab_id}"))
+            response = self._run(tuple(query), timeout=self.timeouts.inspect)
+            identifiers = tuple(line for line in response.stdout.splitlines() if line)
+            pattern = RESOURCE_NAME if kind == "volume" else OBJECT_ID
+            if any(not pattern.fullmatch(identifier) for identifier in identifiers):
+                raise IntegrityError(f"Docker returned a malformed managed {kind} identifier")
+            result[kind] = identifiers
         return result
+
+
+def expected_resource_role(record: ResourceRecord, ownership: Ownership) -> str:
+    if not RESOURCE_NAME.fullmatch(record.name):
+        raise IntegrityError("recorded Docker resource name is malformed")
+    prefix = f"vdy-{ownership.lab_id}-{ownership.run_id[:12]}-"
+    if not record.name.startswith(prefix):
+        raise PolicyError(f"refusing {record.kind} {record.name}: deterministic name mismatch")
+    suffix = record.name[len(prefix) :]
+    if record.kind == "container" and suffix in {"app", "gateway"}:
+        return "application" if suffix == "app" else "gateway"
+    if record.kind == "network" and suffix in {"net", "ingress"}:
+        return "network"
+    if record.kind == "volume" and (suffix == "volume" or suffix.startswith("volume-")):
+        return "volume"
+    raise PolicyError(f"refusing {record.kind} {record.name}: resource role is not recognized")

@@ -20,13 +20,14 @@ normal output excludes spoilers and flags. Stable exits are: 0 success, 2 usage,
 | `open LAB` / `logs LAB` | Open URL or show bounded application logs. |
 | `down LAB` / `stop LAB` | Idempotently stop, retain runtime and data. |
 | `restart LAB` | Stop/start the same locked deployment. |
-| `rebuild LAB` | Recreate with the same lock and preserve declared data. |
+| `rebuild LAB` | Recreate only the same reviewed lock/reference; refuse stale or untrusted state. |
 | `reset LAB --yes` | Preview, then return owned data to the declared clean state. |
 | `remove LAB --yes` | Remove owned runtime resources; retain images. |
 | `purge LAB --images --yes` | Remove owned state and optionally exact known digests. |
 | `update --check [LAB]` | Read-only stable release discovery. |
-| `update [LAB]` | Apply only a reviewed candidate; current release otherwise remains. |
-| `hosts add/remove [LAB]` | Preview and atomically edit only the managed block. |
+| `update [LAB]` | Transactionally activate an installed reviewed candidate; refuse discovery-only versions. |
+| `hosts add/remove [LAB]` | Preview and atomically edit only the managed block through the verified helper. |
+| `hosts helper` | Show the packaged helper path, release checksum, fixed target, owner, and mode. |
 | `provider sync/status vulhub` | Verify/cache or report pinned official metadata. |
 | `completion SHELL` | Bash, Zsh, or Fish completion source. |
 
@@ -36,3 +37,19 @@ declares Internet egress requires `--acknowledge-egress`. An alternate applicati
 image requires both `--unsafe-development` and an immutable `--unsafe-image`; the
 run is visibly untrusted and cannot match the reviewed lock.
 
+Docker operations are always bounded. Advanced users may configure validated
+seconds with `VDY_TIMEOUT_PULL`, `VDY_TIMEOUT_START`, `VDY_TIMEOUT_HEALTH`,
+`VDY_TIMEOUT_STOP`, `VDY_TIMEOUT_CLEANUP`, and `VDY_TIMEOUT_INSPECT`. Each variable
+has a finite accepted range; invalid, zero, negative, or unbounded values fail the
+preflight. Readiness uses Python's built-in bounded HTTP client, so no external
+`curl` or `wget` executable is required. Its effective deadline is the lower of
+`VDY_TIMEOUT_HEALTH` and the reviewed manifest timeout. `pull`, `up`, and update
+activation also fail before pulling when any required image omits the validated
+local `linux/amd64`, `linux/arm64`, or `linux/arm/v7` platform.
+
+`/etc/hosts` is the only privileged operation. Install the helper reported by
+`hosts helper` as `/usr/local/libexec/vulndockyard-hosts`, owned by `root:root`
+and mode `0755`. The CLI rejects a symlink, a writable helper or parent directory,
+and any checksum mismatch. It never executes the active virtual environment or
+project package as root. Fixture and unit-test paths are transformed in-process
+without elevation.
