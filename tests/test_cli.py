@@ -395,6 +395,32 @@ def test_optional_hosts_offer_decline_is_non_destructive(
     assert "Skipped. Add it later" in captured.out
 
 
+@pytest.mark.parametrize("interruption", [EOFError(), KeyboardInterrupt()])
+def test_optional_hosts_prompt_interruption_keeps_successful_start(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    interruption: BaseException,
+) -> None:
+    path = tmp_path / "hosts"
+    original = b"127.0.0.1 localhost\n"
+    path.write_bytes(original)
+    path.chmod(0o644)
+    FixtureHostsManager.fixture_path = path
+    monkeypatch.setattr(cli, "HostsManager", FixtureHostsManager)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    def interrupted(prompt: str) -> str:
+        raise interruption
+
+    monkeypatch.setattr("builtins.input", interrupted)
+    assert cli.main(["up", "juice-shop", "--port", "18080"]) == 0
+    assert path.read_bytes() == original
+    assert "Skipped. Add it later" in capsys.readouterr().out
+
+
 def test_optional_hosts_offer_accepts_and_applies_exact_entry(
     isolated_cli: type[FakeRuntime],
     monkeypatch: pytest.MonkeyPatch,

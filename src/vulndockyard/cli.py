@@ -240,7 +240,11 @@ def _offer_friendly_hosts(lab: ReviewedLab) -> None:
     if not preview.changed:
         return
     print(f"Optional friendly name: add '127.0.0.1 {hostname}' to the managed hosts block.")
-    answer = input("Add it now? [y/N] ").strip().casefold()
+    try:
+        answer = input("Add it now? [y/N] ").strip().casefold()
+    except (EOFError, KeyboardInterrupt):
+        print(f"\nSkipped. Add it later with: vulndockyard hosts add {lab.manifest.id}")
+        return
     if answer not in {"y", "yes"}:
         print(f"Skipped. Add it later with: vulndockyard hosts add {lab.manifest.id}")
         return
