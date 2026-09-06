@@ -64,6 +64,8 @@ def test_manager_atomic_update_preserves_mode(tmp_path: Path) -> None:
     manager = HostsManager(path)
     preview = manager.preview("juice-shop.test", add=True)
     assert preview.changed
+    assert preview.before_block == ""
+    assert preview.after_block == BEGIN + "127.0.0.1\tjuice-shop.test\n" + END
     manager.apply("juice-shop.test", add=True)
     assert path.stat().st_mode & 0o777 == 0o640
     manager.apply("juice-shop.test", add=True)
@@ -108,11 +110,47 @@ def test_manager_refuses_replacement_after_hosts_inode_changes(
     manager = HostsManager(path)
     require_unchanged = manager._require_unchanged
 
-    def swap_before_validation(expected: object) -> None:
+    def swap_before_validation(expected: object, expected_content: bytes) -> None:
         replacement.replace(path)
-        require_unchanged(expected)  # type: ignore[arg-type]
+        require_unchanged(expected, expected_content)  # type: ignore[arg-type]
 
     monkeypatch.setattr(manager, "_require_unchanged", swap_before_validation)
     with pytest.raises(PolicyError, match="changed before atomic replacement"):
         manager.apply("juice-shop.test", add=True)
     assert path.read_bytes().endswith(b"# concurrent change\n")
+
+
+def test_manager_refuses_replacement_after_in_place_content_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "hosts"
+    path.write_bytes(b"127.0.0.1 localhost\n")
+    path.chmod(0o600)
+    manager = HostsManager(path)
+    require_unchanged = manager._require_unchanged
+
+    def mutate_before_validation(expected: object, expected_content: bytes) -> None:
+        path.write_bytes(b"127.0.0.1 localhost\n# concurrent in-place change\n")
+        path.chmod(0o600)
+        require_unchanged(expected, expected_content)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(manager, "_require_unchanged", mutate_before_validation)
+    with pytest.raises(PolicyError, match="changed before atomic replacement"):
+        manager.apply("juice-shop.test", add=True)
+    assert path.read_bytes().endswith(b"# concurrent in-place change\n")
+
+
+def test_manager_aggregates_a_multi_hostname_preview_and_apply(tmp_path: Path) -> None:
+    path = tmp_path / "hosts"
+    path.write_bytes(b"127.0.0.1 localhost\n")
+    path.chmod(0o600)
+    manager = HostsManager(path)
+
+    preview = manager.preview_many(("webgoat.test", "juice-shop.test"), add=True)
+    assert preview.after == ("juice-shop.test", "webgoat.test")
+    assert preview.after_block == (
+        BEGIN + "127.0.0.1\tjuice-shop.test\n" + "127.0.0.1\twebgoat.test\n" + END
+    )
+    applied = manager.apply_many(("webgoat.test", "juice-shop.test"), add=True)
+    assert applied.after_block == preview.after_block
+    assert manager.managed_hosts() == preview.after

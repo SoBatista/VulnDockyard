@@ -14,7 +14,7 @@ from . import __version__
 from .catalogue import Catalogue, ReviewedLab
 from .docker import Docker
 from .errors import CancelledError, ExitCode, PreflightError, VulnDockyardError
-from .hosts import HostsManager, parse_managed_hosts
+from .hosts import HostsManager
 from .output import Output
 from .paths import Paths
 from .privilege import HELPER_PATHS, HELPER_SHA256, invoke_hosts_helper, packaged_helper
@@ -203,30 +203,53 @@ def _host_labs(catalogue: Catalogue, name: str | None) -> tuple[ReviewedLab, ...
     return tuple(lab for lab in catalogue.all() if lab.manifest.adapter_status.value == "runnable")
 
 
-def _apply_hosts(labs: tuple[ReviewedLab, ...], *, add: bool, yes: bool) -> dict[str, Any]:
+def _apply_hosts(
+    labs: tuple[ReviewedLab, ...], *, add: bool, yes: bool, preview_only: bool = False
+) -> dict[str, Any]:
     manager = HostsManager()
     hostnames = tuple(lab.manifest.friendly_hostname for lab in labs)
-    return _apply_hostnames(manager, hostnames, add=add, yes=yes)
+    return _apply_hostnames(manager, hostnames, add=add, yes=yes, preview_only=preview_only)
 
 
 def _apply_hostnames(
-    manager: HostsManager, hostnames: tuple[str, ...], *, add: bool, yes: bool
+    manager: HostsManager,
+    hostnames: tuple[str, ...],
+    *,
+    add: bool,
+    yes: bool,
+    preview_only: bool = False,
 ) -> dict[str, Any]:
-    previews = [manager.preview(hostname, add=add) for hostname in hostnames]
-    changed = [
-        hostname for hostname, preview in zip(hostnames, previews, strict=True) if preview.changed
-    ]
+    preview = manager.preview_many(hostnames, add=add)
+    changed = tuple(sorted((set(preview.after) ^ set(preview.before)) & set(hostnames)))
     action = "add" if add else "remove"
     if not changed:
-        return {"action": action, "changed": False, "hostnames": hostnames}
+        return {
+            "action": action,
+            "changed": False,
+            "applied": False,
+            "hostnames": hostnames,
+            "before_block": preview.before_block,
+            "after_block": preview.after_block,
+        }
+    if preview_only:
+        return {
+            "action": action,
+            "changed": True,
+            "applied": False,
+            "hostnames": changed,
+            "before_block": preview.before_block,
+            "after_block": preview.after_block,
+        }
+    if not yes:
+        proposed = preview.after_block.rstrip() or "(VulnDockyard managed block removed)"
+        print(f"Proposed VulnDockyard hosts modification:\n{proposed}")
     _confirm(f"{action} VulnDockyard hosts entries: {', '.join(changed)}", yes=yes)
     if manager.path != Path("/etc/hosts"):
-        for hostname in changed:
-            manager.apply(hostname, add=add)
+        manager.apply_many(changed, add=add)
     else:
         for hostname in changed:
             invoke_hosts_helper(action, hostname)
-    final = parse_managed_hosts(manager.path.read_bytes())
+    final = manager.managed_hosts()
     if add and not set(changed).issubset(final):
         raise PreflightError("managed hosts update could not be verified")
     if not add and set(changed) & set(final):
@@ -234,8 +257,11 @@ def _apply_hostnames(
     return {
         "action": action,
         "changed": True,
+        "applied": True,
         "hostnames": tuple(changed),
         "managed_after": tuple(sorted(final)),
+        "before_block": preview.before_block,
+        "after_block": preview.after_block,
     }
 
 
@@ -345,7 +371,7 @@ def _doctor(paths: Paths, hosts_manager: HostsManager | None = None) -> dict[str
     )
     try:
         manager = hosts_manager or HostsManager()
-        managed = parse_managed_hosts(manager.path.read_bytes())
+        managed = manager.managed_hosts()
         known = {lab.manifest.friendly_hostname for lab in Catalogue().all()}
         stale = tuple(sorted(set(managed) - known))
         checks.append(
@@ -606,9 +632,18 @@ def dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser, output: 
             )
             return
         labs = _host_labs(catalogue, args.lab)
-        host_value = _apply_hosts(labs, add=args.hosts_command == "add", yes=args.yes)
+        host_value = _apply_hosts(
+            labs,
+            add=args.hosts_command == "add",
+            yes=args.yes,
+            preview_only=output.json_mode and not args.yes,
+        )
         hostnames = ", ".join(str(item) for item in host_value["hostnames"])
-        outcome = "changed" if host_value["changed"] else "already correct"
+        outcome = (
+            "preview only"
+            if host_value["changed"] and not host_value["applied"]
+            else ("changed" if host_value["changed"] else "already correct")
+        )
         output.emit(
             command,
             host_value,

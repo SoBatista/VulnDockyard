@@ -308,6 +308,52 @@ def test_hosts_commands_are_idempotent_on_fixture(
     assert capsys.readouterr().out
 
 
+def test_json_hosts_without_yes_is_an_exact_non_mutating_preview(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "hosts"
+    original = b"127.0.0.1 localhost\n# unrelated\n"
+    path.write_bytes(original)
+    path.chmod(0o644)
+    FixtureHostsManager.fixture_path = path
+    monkeypatch.setattr(cli, "HostsManager", FixtureHostsManager)
+
+    assert cli.main(["--json", "hosts", "add", "juice-shop"]) == 0
+
+    document = json.loads(capsys.readouterr().out)
+    assert document["data"]["applied"] is False
+    assert document["data"]["changed"] is True
+    assert document["data"]["before_block"] == ""
+    assert "127.0.0.1\tjuice-shop.test" in document["data"]["after_block"]
+    assert path.read_bytes() == original
+
+
+def test_interactive_hosts_confirmation_shows_exact_managed_block(
+    isolated_cli: type[FakeRuntime],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "hosts"
+    path.write_bytes(b"127.0.0.1 localhost\n")
+    path.chmod(0o644)
+    FixtureHostsManager.fixture_path = path
+    monkeypatch.setattr(cli, "HostsManager", FixtureHostsManager)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "yes")
+
+    assert cli.main(["hosts", "add", "juice-shop"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Proposed VulnDockyard hosts modification:" in output
+    assert "# BEGIN VULNDOCKYARD MANAGED BLOCK" in output
+    assert "127.0.0.1\tjuice-shop.test" in output
+
+
 class FakeProvider:
     def __init__(self, paths: Paths) -> None:
         pass

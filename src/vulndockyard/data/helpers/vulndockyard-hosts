@@ -92,14 +92,20 @@ def transform(content, values):
     return before + block + content[region[1] :]
 
 
-def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in {"add", "remove"}:
-        fail("usage: vulndockyard-hosts {add|remove} LAB.test")
-    hostname = os.fsencode(sys.argv[2])
-    if not HOSTNAME.fullmatch(hostname):
-        fail("hostname must be a lowercase .test name")
-    if os.geteuid() != 0:
-        fail("helper must run as root")
+def fingerprint(info):
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def snapshot():
     info = os.lstat(HOSTS)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         fail("/etc/hosts must be a regular non-symlink file")
@@ -108,10 +114,8 @@ def main():
     descriptor = os.open(HOSTS, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+        if fingerprint(opened) != fingerprint(info):
             fail("/etc/hosts changed during validation")
-        if not stat.S_ISREG(opened.st_mode) or opened.st_uid != 0:
-            fail("opened /etc/hosts has unsafe ownership or type")
         chunks = []
         remaining = 2_000_001
         while remaining:
@@ -121,10 +125,25 @@ def main():
             chunks.append(chunk)
             remaining -= len(chunk)
         content = b"".join(chunks)
+        finished = os.fstat(descriptor)
+        if fingerprint(finished) != fingerprint(opened):
+            fail("/etc/hosts changed while it was being read")
     finally:
         os.close(descriptor)
     if len(content) > 2_000_000 or b"\x00" in content:
         fail("/etc/hosts is too large or contains a NUL byte")
+    return finished, content
+
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] not in {"add", "remove"}:
+        fail("usage: vulndockyard-hosts {add|remove} LAB.test")
+    hostname = os.fsencode(sys.argv[2])
+    if not HOSTNAME.fullmatch(hostname):
+        fail("hostname must be a lowercase .test name")
+    if os.geteuid() != 0:
+        fail("helper must run as root")
+    info, content = snapshot()
     values = set(parse(content))
     if sys.argv[1] == "add":
         values.add(hostname)
@@ -145,11 +164,8 @@ def main():
         with open(temporary, "rb") as handle:
             if parse(handle.read()) != expected:
                 fail("temporary hosts file failed validation")
-        current = os.lstat(HOSTS)
-        if stat.S_ISLNK(current.st_mode) or (current.st_dev, current.st_ino) != (
-            info.st_dev,
-            info.st_ino,
-        ):
+        current, current_content = snapshot()
+        if fingerprint(current) != fingerprint(info) or current_content != content:
             fail("/etc/hosts changed before atomic replacement")
         os.replace(temporary, HOSTS)
         directory = os.open("/etc", os.O_RDONLY | os.O_DIRECTORY)

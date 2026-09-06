@@ -112,6 +112,29 @@ class HostsPreview:
     before: tuple[str, ...]
     after: tuple[str, ...]
     changed: bool
+    before_block: str
+    after_block: str
+
+
+def _fingerprint(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _block_text(content: bytes) -> str:
+    bounds = _bounds(content)
+    if bounds is None:
+        return ""
+    parse_managed_hosts(content)
+    return content[bounds[0] : bounds[1]].decode("ascii")
 
 
 class HostsManager:
@@ -136,7 +159,7 @@ class HostsManager:
         descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             opened = os.fstat(descriptor)
-            if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            if _fingerprint(opened) != _fingerprint(info):
                 raise PolicyError("hosts file changed during validation")
             self._validate(opened)
             chunks: list[bytes] = []
@@ -148,35 +171,64 @@ class HostsManager:
                 chunks.append(chunk)
                 remaining -= len(chunk)
             content = b"".join(chunks)
+            finished = os.fstat(descriptor)
+            if _fingerprint(finished) != _fingerprint(opened):
+                raise PolicyError("hosts file changed while it was being read")
         finally:
             os.close(descriptor)
         if len(content) > 2_000_000 or b"\x00" in content:
             raise IntegrityError("hosts file is too large or contains a NUL byte")
-        return info, content
+        return finished, content
 
-    def _require_unchanged(self, expected: os.stat_result) -> None:
-        current = self.path.lstat()
-        self._validate(current)
-        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+    def _require_unchanged(self, expected: os.stat_result, expected_content: bytes) -> None:
+        current, content = self._snapshot()
+        if _fingerprint(current) != _fingerprint(expected) or content != expected_content:
             raise PolicyError("hosts file changed before atomic replacement")
 
     def preview(self, hostname: str, *, add: bool) -> HostsPreview:
+        return self.preview_many((hostname,), add=add)
+
+    def preview_many(self, hostnames: tuple[str, ...], *, add: bool) -> HostsPreview:
         _, content = self._snapshot()
         before = parse_managed_hosts(content)
         values = set(before)
-        values.add(hostname) if add else values.discard(hostname)
+        if any(HOSTNAME.fullmatch(hostname) is None for hostname in hostnames):
+            raise IntegrityError("managed hostname is not a lowercase .test name")
+        values.update(hostnames) if add else values.difference_update(hostnames)
         after = tuple(sorted(values))
-        return HostsPreview(before, after, before != after)
+        updated = transform_hosts(content, after)
+        return HostsPreview(
+            before,
+            after,
+            before != after,
+            _block_text(content),
+            _block_text(updated),
+        )
+
+    def managed_hosts(self) -> tuple[str, ...]:
+        _, content = self._snapshot()
+        return parse_managed_hosts(content)
 
     def apply(self, hostname: str, *, add: bool) -> HostsPreview:
+        return self.apply_many((hostname,), add=add)
+
+    def apply_many(self, hostnames: tuple[str, ...], *, add: bool) -> HostsPreview:
         info, content = self._snapshot()
         before = parse_managed_hosts(content)
         values = set(before)
-        values.add(hostname) if add else values.discard(hostname)
+        if any(HOSTNAME.fullmatch(hostname) is None for hostname in hostnames):
+            raise IntegrityError("managed hostname is not a lowercase .test name")
+        values.update(hostnames) if add else values.difference_update(hostnames)
         after = tuple(sorted(values))
         updated = transform_hosts(content, after)
         if updated == content:
-            return HostsPreview(before, after, False)
+            return HostsPreview(
+                before,
+                after,
+                False,
+                _block_text(content),
+                _block_text(updated),
+            )
         directory = self.path.parent
         descriptor, temporary = tempfile.mkstemp(prefix=".vulndockyard-hosts-", dir=directory)
         try:
@@ -192,7 +244,7 @@ class HostsManager:
                     raise
             if parse_managed_hosts(Path(temporary).read_bytes()) != after:
                 raise IntegrityError("temporary hosts replacement failed validation")
-            self._require_unchanged(info)
+            self._require_unchanged(info, content)
             os.replace(temporary, self.path)
             directory_fd = os.open(directory, os.O_RDONLY)
             try:
@@ -202,4 +254,10 @@ class HostsManager:
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)
-        return HostsPreview(before, after, True)
+        return HostsPreview(
+            before,
+            after,
+            True,
+            _block_text(content),
+            _block_text(updated),
+        )
