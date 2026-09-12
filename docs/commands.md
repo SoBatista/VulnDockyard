@@ -86,10 +86,13 @@ mixes prompts or human text into the JSON stream.
 
 This minimum prevents the isolated application bridge from receiving a default
 outbound route; it is a containment boundary, not a general compatibility floor.
-On Linux Mint, identify the Ubuntu base release for the installed Mint version,
-then follow Docker's official Ubuntu Engine installation instructions to upgrade
-manually to Engine 28.0.0 or newer. Rerun `vulndockyard doctor` afterward.
-VulnDockyard never installs, upgrades, or modifies Docker automatically.
+The failure detail names the base distribution read from `/etc/os-release`: on
+Ubuntu-based Linux Mint follow Docker's official Ubuntu Engine instructions with the
+`UBUNTU_CODENAME` value, and on LMDE (`ID_LIKE=debian`) follow Docker's official
+Debian Engine instructions with the `DEBIAN_CODENAME` value; the Mint codename
+itself is never present in Docker's repositories. Upgrade manually to Engine
+28.0.0 or newer and rerun `vulndockyard doctor` afterward. VulnDockyard never
+installs, upgrades, or modifies Docker automatically.
 
 `/etc/hosts` is the only privileged operation. Install the helper reported by
 `hosts helper` as `/usr/local/libexec/vulndockyard-hosts`, owned by `root:root`

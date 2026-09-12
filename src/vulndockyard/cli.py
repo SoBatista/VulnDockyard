@@ -30,10 +30,9 @@ DOCKER_ISOLATION_REASON = (
     "IPv4 bridge gateway mode to prevent the internal application network from receiving "
     "a default outbound route."
 )
-DOCKER_MINT_GUIDANCE = (
-    "Linux Mint: identify the Ubuntu base release for your Mint version, follow Docker's "
-    "official Ubuntu Engine installation instructions to upgrade manually, then rerun "
-    "vulndockyard doctor. VulnDockyard never installs or modifies Docker."
+DOCKER_UPGRADE_FOOTER = (
+    "to upgrade manually, then rerun vulndockyard doctor. VulnDockyard never installs or "
+    "modifies Docker."
 )
 __all__ = ["HELPER_SHA256", "main"]
 
@@ -327,6 +326,55 @@ def _offer_friendly_hosts(lab: ReviewedLab) -> None:
     print(f"Friendly hostname {hostname}: {outcome}")
 
 
+def docker_upgrade_guidance(os_release: Mapping[str, str] | None = None) -> str:
+    """Return distribution-aware manual Docker Engine upgrade guidance.
+
+    Linux Mint reports ``ID=linuxmint`` for both its Ubuntu-based editions and the
+    Debian-based LMDE, and the Mint codename is never present in Docker's apt
+    repositories; the base distribution and its codename decide which official
+    instructions apply.
+    """
+    if os_release is None:
+        try:
+            os_release = platform.freedesktop_os_release()
+        except OSError:
+            os_release = {}
+    distro = os_release.get("ID", "").strip().casefold()
+    like = os_release.get("ID_LIKE", "").casefold().split()
+    if distro == "linuxmint":
+        if "ubuntu" not in like and "debian" in like:
+            codename = os_release.get("DEBIAN_CODENAME", "").strip() or "the Debian base release"
+            return (
+                "LMDE is Debian-based: follow Docker's official Debian Engine installation "
+                f"instructions using the Debian codename ({codename}), not the Mint codename, "
+                f"{DOCKER_UPGRADE_FOOTER}"
+            )
+        codename = os_release.get("UBUNTU_CODENAME", "").strip() or "the Ubuntu base release"
+        return (
+            "Linux Mint is Ubuntu-based: follow Docker's official Ubuntu Engine installation "
+            f"instructions using the Ubuntu codename ({codename}), not the Mint codename, "
+            f"{DOCKER_UPGRADE_FOOTER}"
+        )
+    if distro == "ubuntu" or "ubuntu" in like:
+        codename = os_release.get("UBUNTU_CODENAME", "").strip() or "the Ubuntu base release"
+        return (
+            "Ubuntu-based system: follow Docker's official Ubuntu Engine installation "
+            f"instructions for {codename} {DOCKER_UPGRADE_FOOTER}"
+        )
+    if distro == "debian" or "debian" in like:
+        codename = "the Debian base release"
+        if distro == "debian":
+            codename = os_release.get("VERSION_CODENAME", "").strip() or codename
+        return (
+            "Debian-based system: follow Docker's official Debian Engine installation "
+            f"instructions for {codename} {DOCKER_UPGRADE_FOOTER}"
+        )
+    return (
+        "Follow Docker's official Engine installation instructions for your distribution "
+        f"{DOCKER_UPGRADE_FOOTER}"
+    )
+
+
 def _doctor(paths: Paths, hosts_manager: HostsManager | None = None) -> dict[str, Any]:
     checks: list[dict[str, object]] = []
     checks.append(
@@ -353,7 +401,7 @@ def _doctor(paths: Paths, hosts_manager: HostsManager | None = None) -> dict[str
                     "parsed": detail.get("engine_version"),
                     "minimum": detail.get("minimum_engine"),
                     "reason": DOCKER_ISOLATION_REASON,
-                    "linux_mint_upgrade": DOCKER_MINT_GUIDANCE,
+                    "upgrade_guidance": docker_upgrade_guidance(),
                 },
             }
         )
@@ -435,7 +483,7 @@ def _doctor_detail(check: Mapping[str, object]) -> object:
     status = f"server={detail.get('server')}; minimum={detail.get('minimum')}"
     if check["ok"]:
         return f"{status}; {detail.get('reason')}"
-    return f"{status}; {detail.get('reason')} {detail.get('linux_mint_upgrade')}"
+    return f"{status}; {detail.get('reason')} {detail.get('upgrade_guidance')}"
 
 
 def _completion(shell: str) -> str:

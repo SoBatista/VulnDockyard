@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import sys
 from pathlib import Path
 from typing import Any
@@ -658,13 +659,89 @@ def test_doctor_fails_when_engine_cannot_enforce_isolated_gateway_mode(
 
     monkeypatch.setattr(cli, "Docker", OldDocker)
     monkeypatch.setattr(cli, "port_available", lambda port: True)
+    monkeypatch.setattr(
+        platform,
+        "freedesktop_os_release",
+        lambda: {"ID": "linuxmint", "ID_LIKE": "debian", "DEBIAN_CODENAME": "trixie"},
+    )
     assert cli.main(["doctor"]) == 5
     captured = capsys.readouterr()
     assert "FAIL docker-engine-isolation" in captured.err
     assert "prevent the internal application network" in captured.err
-    assert "Linux Mint" in captured.err
+    assert "LMDE is Debian-based" in captured.err
+    assert "Debian codename (trixie)" in captured.err
     assert "upgrade manually" in captured.err
     assert "never installs or modifies Docker" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("os_release", "expected"),
+    [
+        (
+            {"ID": "linuxmint", "ID_LIKE": "debian", "DEBIAN_CODENAME": "trixie"},
+            "LMDE is Debian-based: follow Docker's official Debian Engine installation "
+            "instructions using the Debian codename (trixie), not the Mint codename,",
+        ),
+        (
+            {"ID": "linuxmint", "ID_LIKE": "ubuntu debian", "UBUNTU_CODENAME": "noble"},
+            "Linux Mint is Ubuntu-based: follow Docker's official Ubuntu Engine installation "
+            "instructions using the Ubuntu codename (noble), not the Mint codename,",
+        ),
+        (
+            {"ID": "linuxmint"},
+            "Ubuntu codename (the Ubuntu base release), not the Mint codename,",
+        ),
+        (
+            {"ID": "ubuntu", "ID_LIKE": "debian", "UBUNTU_CODENAME": "noble"},
+            "Ubuntu-based system: follow Docker's official Ubuntu Engine installation "
+            "instructions for noble",
+        ),
+        (
+            {"ID": "pop", "ID_LIKE": "ubuntu debian", "UBUNTU_CODENAME": "noble"},
+            "Ubuntu-based system: follow Docker's official Ubuntu Engine installation "
+            "instructions for noble",
+        ),
+        (
+            {"ID": "debian", "VERSION_CODENAME": "trixie"},
+            "Debian-based system: follow Docker's official Debian Engine installation "
+            "instructions for trixie",
+        ),
+        (
+            {"ID": "kali", "ID_LIKE": "debian", "VERSION_CODENAME": "kali-rolling"},
+            "Debian-based system: follow Docker's official Debian Engine installation "
+            "instructions for the Debian base release",
+        ),
+        (
+            {"ID": "fedora"},
+            "Follow Docker's official Engine installation instructions for your distribution",
+        ),
+        ({}, "Follow Docker's official Engine installation instructions for your distribution"),
+    ],
+)
+def test_docker_upgrade_guidance_follows_base_distribution(
+    os_release: dict[str, str], expected: str
+) -> None:
+    guidance = cli.docker_upgrade_guidance(os_release)
+    assert guidance.startswith(expected) or expected in guidance
+    assert guidance.endswith("VulnDockyard never installs or modifies Docker.")
+    assert "kali-rolling" not in guidance
+
+
+def test_docker_upgrade_guidance_reads_os_release_and_tolerates_absence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        platform,
+        "freedesktop_os_release",
+        lambda: {"ID": "linuxmint", "ID_LIKE": "debian", "DEBIAN_CODENAME": "trixie"},
+    )
+    assert cli.docker_upgrade_guidance().startswith("LMDE is Debian-based")
+
+    def missing() -> dict[str, str]:
+        raise OSError("no os-release")
+
+    monkeypatch.setattr(platform, "freedesktop_os_release", missing)
+    assert cli.docker_upgrade_guidance().startswith("Follow Docker's official Engine")
 
 
 def test_doctor_reports_docker_permission_failure_without_disclosing_path(

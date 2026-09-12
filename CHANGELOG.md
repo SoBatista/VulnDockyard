@@ -33,6 +33,10 @@ Target release: 1.0.0 (not yet released).
 
 ### Fixed
 
+- Make the `doctor` Docker Engine upgrade guidance follow the base distribution
+  from `/etc/os-release`: LMDE is directed to Docker's Debian repository with its
+  `DEBIAN_CODENAME`, Ubuntu-based Mint to the Ubuntu repository with its
+  `UBUNTU_CODENAME`, instead of Ubuntu instructions for every Mint edition.
 - Align the Juice Shop rebuild smoke with upstream's documented self-healing:
   application state is intentionally ephemeral and its SQLite schema is recreated
   on every process start, while generic persistent-volume behavior remains covered
