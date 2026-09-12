@@ -15,7 +15,7 @@ import pytest
 
 import vulndockyard.privilege as privilege
 from vulndockyard.errors import PreflightError
-from vulndockyard.process import Result, Runner
+from vulndockyard.process import CommandError, CommandTimeout, Result, Runner
 
 
 class RecordingRunner(Runner):
@@ -183,20 +183,102 @@ def test_invoke_uses_only_validated_helper_and_system_sudo(
     selected = iter((Path("/approved/helper"), Path("/usr/bin/sudo")))
     monkeypatch.setattr(privilege, "_root_executable", lambda *args, **kwargs: next(selected))
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    elevated: list[tuple[tuple[str, ...], float]] = []
+
+    def fake_elevated(argv: Sequence[str], *, timeout: float) -> Result:
+        elevated.append((tuple(argv), timeout))
+        return Result(tuple(argv), 0, "", "")
+
+    monkeypatch.setattr(privilege, "_run_elevated", fake_elevated)
     runner = RecordingRunner()
     checksum = "a" * 64
     privilege.invoke_hosts_helper(checksum, ("juice-shop.test", "webgoat.test"), runner)
-    assert runner.commands == [
+    # The detached Runner can never satisfy a sudo password prompt, so sudo must
+    # run through the session-preserving path and never through the Runner.
+    assert runner.commands == []
+    assert elevated == [
         (
-            "/usr/bin/sudo",
-            "--",
-            "/approved/helper",
-            "replace",
-            checksum,
-            "juice-shop.test",
-            "webgoat.test",
+            (
+                "/usr/bin/sudo",
+                "--",
+                "/approved/helper",
+                "replace",
+                checksum,
+                "juice-shop.test",
+                "webgoat.test",
+            ),
+            privilege.SUDO_TIMEOUT,
         )
     ]
+
+
+def test_invoke_as_root_calls_the_helper_directly_through_the_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(privilege, "_root_executable", lambda *args, **kwargs: Path("/h"))
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+    def unexpected(argv: Sequence[str], *, timeout: float) -> Result:
+        raise AssertionError("root must not go through sudo")
+
+    monkeypatch.setattr(privilege, "_run_elevated", unexpected)
+    runner = RecordingRunner()
+    checksum = "b" * 64
+    privilege.invoke_hosts_helper(checksum, ("juice-shop.test",), runner)
+    assert runner.commands == [("/h", "replace", checksum, "juice-shop.test")]
+
+
+def _python(snippet: str) -> tuple[str, ...]:
+    return (sys.executable, "-I", "-c", snippet)
+
+
+def test_run_elevated_keeps_the_session_and_captures_output() -> None:
+    result = privilege._run_elevated(
+        _python(
+            "import os, sys; sys.stdout.write(str(os.getsid(0) == os.getsid(os.getppid())));"
+            " sys.stderr.write('quiet'); sys.exit(0)"
+        ),
+        timeout=30,
+    )
+    assert result.returncode == 0
+    assert result.stdout == "True"
+    assert result.stderr == "quiet"
+
+
+def test_run_elevated_explains_a_missing_terminal() -> None:
+    with pytest.raises(PreflightError, match="no controlling terminal"):
+        privilege._run_elevated(
+            _python(
+                "import sys; sys.stderr.write('sudo: a terminal is required to read the "
+                "password; either use the -S option to read from standard input or configure "
+                "an askpass helper\\nsudo: a password is required\\n'); sys.exit(1)"
+            ),
+            timeout=30,
+        )
+
+
+def test_run_elevated_reports_other_failures_as_command_errors() -> None:
+    with pytest.raises(CommandError, match="hosts file contains multiple"):
+        privilege._run_elevated(
+            _python(
+                "import sys; sys.stderr.write('Error: hosts file contains multiple'); sys.exit(1)"
+            ),
+            timeout=30,
+        )
+
+
+def test_run_elevated_terminates_on_timeout() -> None:
+    with pytest.raises(CommandTimeout, match="timed out"):
+        privilege._run_elevated(_python("import time; time.sleep(30)"), timeout=0.2)
+
+
+def test_run_elevated_rejects_missing_executable_and_bad_argv() -> None:
+    with pytest.raises(PreflightError, match="required executable is unavailable"):
+        privilege._run_elevated(("/nonexistent/vulndockyard-sudo", "--"), timeout=1)
+    with pytest.raises(ValueError, match="argument vector"):
+        privilege._run_elevated((), timeout=1)
+    with pytest.raises(ValueError, match="argument vector"):
+        privilege._run_elevated(("a", "b\x00c"), timeout=1)
 
 
 @pytest.mark.parametrize(

@@ -99,4 +99,7 @@ installs, upgrades, or modifies Docker automatically.
 and mode `0755`. The CLI rejects a symlink, a writable helper or parent directory,
 and any checksum mismatch. It never executes the active virtual environment or
 project package as root. Fixture and unit-test paths are transformed in-process
-without elevation.
+without elevation. When not already root, the CLI runs `sudo -- HELPER ...` inside
+the caller's own session so sudo can prompt on the controlling terminal or reuse
+that terminal's cached credential; without a terminal it fails with guidance to
+rerun interactively or authenticate first with `sudo -v`.

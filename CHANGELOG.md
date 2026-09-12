@@ -33,6 +33,10 @@ Target release: 1.0.0 (not yet released).
 
 ### Fixed
 
+- Run the `/etc/hosts` helper's `sudo` in the caller's session instead of the
+  detached subprocess session, so `hosts add` and `hosts remove` can prompt for a
+  password (or reuse the terminal's cached credential) rather than failing with
+  "a terminal is required to read the password" on every default sudo setup.
 - Make the `doctor` Docker Engine upgrade guidance follow the base distribution
   from `/etc/os-release`: LMDE is directed to Docker's Debian repository with its
   `DEBIAN_CODENAME`, Ubuntu-based Mint to the Ubuntu repository with its
