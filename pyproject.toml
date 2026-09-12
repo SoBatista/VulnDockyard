@@ -27,7 +27,7 @@ dependencies = ["PyYAML==6.0.3"]
 dev = [
   "build==1.6.0",
   "coverage[toml]==7.16.0",
-  "editables==0.5",
+  "editables==0.6",
   "hatchling==1.32.0",
   "jsonschema[format-nongpl]==4.25.1",
   "mypy==2.3.1",
