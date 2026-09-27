@@ -24,9 +24,17 @@ def _bootstrap_context(monkeypatch: pytest.MonkeyPatch, *, released: bool) -> No
 
 
 def test_unreleased_bootstrap_does_not_require_a_release_impact_label(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## [Unreleased]\n\n"
+        "Target release: 1.0.0 (not yet released).\n\n"
+        "### Added\n\n- First reviewed capability.\n\n"
+        "[Unreleased]: https://example.test/commits/main\n",
+        encoding="utf-8",
+    )
     _bootstrap_context(monkeypatch, released=False)
+    monkeypatch.setattr(check_release_metadata, "ROOT", tmp_path)
     check_release_metadata.check()
 
 
