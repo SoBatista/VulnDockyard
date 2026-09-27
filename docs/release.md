@@ -1,11 +1,13 @@
 # Release and repository operations
 
-Version 1.0.0 is the target first release and has not been released. While its
-gates remain incomplete, the README identifies it as an unreleased target and
-its notes remain under `[Unreleased]` in the changelog. The final reviewed
-release change must move those notes to one dated `[1.0.0]` section, change the
-README projection to a released version, and pass every release gate. No tag,
-GitHub Release, package, or image may be published from the target state.
+Version 1.0.0 is the first release. Its reviewed release change moved the
+complete `[Unreleased]` notes intact to one dated `[1.0.0]` section and changed
+the README projection to a released version; the `v1.0.0` tag and GitHub Release
+are created only by the manual release workflow described below. No tag, GitHub
+Release, package, or image may be published from an unreleased target state.
+Until `v1.0.0` is tagged on `main`, the release-metadata check rejects every
+further pull request, so dispatch the release promptly after the release change
+merges.
 
 `src/vulndockyard/_version.py` is authoritative. `VERSION`, package metadata,
 CLI output, README, and changelog are checked projections. Releases use SemVer,
@@ -62,8 +64,13 @@ The required CI quality job owns the single installed-environment dependency che
 through `scripts/ci-check.sh`; the project validator reads installed distribution
 metadata directly, so it works in both `uv` environments without bundled `pip` and
 standard GitHub Python environments. The complete local gate performs the same
-check in its own environment. The Security workflow is reserved for CodeQL so pull
-requests do not pay for a duplicate dependency installation and validation job.
+check in its own environment. The Security workflow runs CodeQL and a dedicated
+`gitleaks` job on pull requests, `main` pushes, and its weekly schedule. The
+Gitleaks job installs no Python dependencies: it bootstraps the same
+checksum-pinned binary with the standard-library installer and scans all
+reachable Git history with the repository's `.gitleaks.toml`, so a secret scan
+result is visible as its own check. The Security workflow never duplicates the
+dependency installation and validation job.
 
 The release workflow is manual-only and must be dispatched from `main` after the
 maintainer explicitly approves publication. It accepts a CI run ID, verifies via

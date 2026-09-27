@@ -53,6 +53,45 @@ def _walk(value: object) -> list[dict[str, Any]]:
     return found
 
 
+def _gitleaks_job_failures(event_names: set[str], jobs: dict[str, Any]) -> list[str]:
+    """Require a dedicated, dependency-free Gitleaks job on pull requests and pushes."""
+    failures: list[str] = []
+    if not {"pull_request", "push"} <= event_names:
+        failures.append("security.yml: secret scanning must run on pull requests and pushes")
+    job = jobs.get("gitleaks")
+    if not isinstance(job, dict):
+        return [*failures, "security.yml: a dedicated gitleaks job is required"]
+    if job.get("if") is not None:
+        failures.append("security.yml:gitleaks: secret scanning must not be conditional")
+    if job.get("permissions") is not None:
+        failures.append("security.yml:gitleaks: secret scanning needs only default read access")
+    steps = [step for step in job.get("steps", []) if isinstance(step, dict)]
+    checkouts = [
+        step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@")
+    ]
+    if (
+        len(checkouts) != 1
+        or not isinstance(checkouts[0].get("with"), dict)
+        or checkouts[0]["with"].get("fetch-depth") != 0
+        or checkouts[0]["with"].get("persist-credentials") not in {False, "false"}
+    ):
+        failures.append(
+            "security.yml:gitleaks: checkout must fetch complete history without credentials"
+        )
+    runs = [step["run"] for step in steps if isinstance(step.get("run"), str)]
+    run_text = "\n".join(runs)
+    for required in (
+        "python3 scripts/install_gitleaks.py",
+        ".tools/gitleaks git",
+        "--config .gitleaks.toml",
+        "--redact=100",
+        "--log-opts=--all",
+    ):
+        if required not in run_text:
+            failures.append(f"security.yml:gitleaks: scan lacks required element: {required}")
+    return failures
+
+
 def check() -> None:
     failures: list[str] = []
     workflow_root = ROOT / ".github" / "workflows"
@@ -272,6 +311,8 @@ def check() -> None:
             failures.append(
                 "security.yml: dependency closure checks must not duplicate the CI quality gate"
             )
+        if path.name == "security.yml":
+            failures.extend(_gitleaks_job_failures(event_names, jobs))
         for match in re.finditer(r"retention-days:\s*(\d+)", text):
             if int(match.group(1)) > 7:
                 failures.append(f"{path.name}: artifact retention exceeds seven days")

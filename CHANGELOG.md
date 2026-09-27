@@ -7,7 +7,7 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-Target release: 1.0.0 (not yet released).
+## [1.0.0] - 2026-09-27
 
 ### Added
 
@@ -65,4 +65,5 @@ Target release: 1.0.0 (not yet released).
 - Validate packaged catalogue data against executable Draft 2020-12 schemas and keep
   bootstrap release notes byte-for-byte equivalent to their reviewed target section.
 
-[Unreleased]: https://github.com/SoBatista/VulnDockyard/commits/main
+[Unreleased]: https://github.com/SoBatista/VulnDockyard/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/SoBatista/VulnDockyard/releases/tag/v1.0.0

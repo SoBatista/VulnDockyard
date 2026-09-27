@@ -35,3 +35,20 @@ jobs:
           languages: python
       - name: Analyze
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out complete reviewed history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the checksum-pinned Gitleaks binary
+        run: python3 scripts/install_gitleaks.py
+      - name: Scan all reachable Git history
+        run: >-
+          .tools/gitleaks git --no-banner --no-color --redact=100
+          --config .gitleaks.toml --timeout=300 --log-opts=--all .

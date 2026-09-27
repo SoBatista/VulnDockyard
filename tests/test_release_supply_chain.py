@@ -7,6 +7,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from scripts import check_version as check_version_module
+from scripts import check_workflows as check_workflows_module
 from scripts import release as release_module
 from scripts import secret_scan
 from scripts.check_repository import (
@@ -57,7 +59,43 @@ def test_every_canonical_version_projection_is_consistent() -> None:
     assert check_version() == "1.0.0"
 
 
-def test_unreleased_target_cannot_enter_publication_workflow() -> None:
+def test_repository_projects_the_dated_first_release() -> None:
+    readme = Path("README.md").read_text(encoding="utf-8")
+    changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert _projection_state("1.0.0", readme, changelog) == "released"
+    assert release_changelog_notes("1.0.0", changelog).startswith("### Added\n")
+    assert "not yet released" not in changelog
+
+
+def test_unreleased_target_cannot_enter_publication_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for relative in ("VERSION", "docs/release.md", "src/vulndockyard/_version.py"):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(Path(relative).read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        Path("pyproject.toml")
+        .read_text(encoding="utf-8")
+        .replace("Development Status :: 5 - Production/Stable", "Development Status :: 3 - Alpha"),
+        encoding="utf-8",
+    )
+    (tmp_path / "README.md").write_text(
+        "https://img.shields.io/badge/target--version-1.0.0-orange\n"
+        "Target version: `1.0.0` (unreleased; release gates incomplete).\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "CHANGELOG.md").write_text(
+        "## [Unreleased]\n\n"
+        "Target release: 1.0.0 (not yet released).\n\n"
+        "### Added\n\n- Reviewed note.\n\n"
+        "[Unreleased]: https://github.com/SoBatista/VulnDockyard/commits/main\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_version_module, "ROOT", tmp_path)
+
+    assert check_version() == "1.0.0"
     with pytest.raises(RuntimeError, match="unreleased target, not publication-ready"):
         check_release_ready()
 
@@ -155,6 +193,39 @@ def test_changelog_note_extraction_excludes_reference_links() -> None:
 
 def test_workflow_supply_chain_policy() -> None:
     check_workflows()
+
+
+def test_workflow_policy_requires_full_history_gitleaks_on_prs_and_pushes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    for source in Path(".github/workflows").glob("*.yml"):
+        (workflows / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "ci-check.sh").write_text(
+        Path("scripts/ci-check.sh").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    monkeypatch.setattr(check_workflows_module, "ROOT", tmp_path)
+    security = workflows / "security.yml"
+    original = security.read_text(encoding="utf-8")
+    check_workflows()
+
+    security.write_text(original[: original.index("\n  gitleaks:\n")] + "\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="a dedicated gitleaks job is required"):
+        check_workflows()
+
+    security.write_text(original.replace("fetch-depth: 0", "fetch-depth: 1"), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="checkout must fetch complete history"):
+        check_workflows()
+
+    security.write_text(original.replace("  push:\n    branches: [main]\n", ""), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="must run on pull requests and pushes"):
+        check_workflows()
+
+    security.write_text(original.replace(" --log-opts=--all", ""), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="scan lacks required element: --log-opts=--all"):
+        check_workflows()
 
 
 def test_dependency_environment_check_is_consolidated() -> None:
