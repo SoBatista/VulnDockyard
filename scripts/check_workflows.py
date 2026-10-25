@@ -28,6 +28,7 @@ TRUSTED_ACTIONS = {
     "actions/upload-artifact": "cf430e030ddbb5b0abf93d22962f4752f3646cd9",
     "github/codeql-action/analyze": "2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
     "github/codeql-action/init": "2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
+    "renovatebot/github-action": "e09d604f8f803bb527bd8321ed5be06c460b8682",
 }
 
 

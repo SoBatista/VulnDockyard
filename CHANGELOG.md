@@ -31,6 +31,14 @@ Target release: 1.0.0 (not yet released).
 - Apache-2.0 OSS governance, security, maintenance, CI, release, SBOM, and
   post-publication verification foundations.
 
+### Changed
+
+- Dependency updates for the Python project and GitHub Actions now come from a
+  self-hosted Renovate workflow (`.github/workflows/renovate.yml`, policy in
+  `renovate.json`) instead of Dependabot version updates. Renovate signs off
+  every commit for the DCO check, groups updates like the Dependabot groups
+  did, and never merges; GitHub's Dependabot security alerts stay on.
+
 ### Fixed
 
 - Run the `/etc/hosts` helper's `sudo` in the caller's session instead of the
