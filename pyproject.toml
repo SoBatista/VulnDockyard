@@ -35,7 +35,7 @@ dev = [
   "pre-commit==4.7.0",
   "pytest==9.1.1",
   "pytest-cov==7.1.0",
-  "ruff==0.17.0",
+  "ruff==0.17.1",
   "spdx-tools==0.8.5",
   "types-jsonschema==4.26.0.20261006",
   "types-PyYAML==6.0.12.20260906",
