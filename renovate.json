@@ -1,0 +1,70 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Full config inline on purpose: this repo does not extend a preset owned by another account, so its bot behaviour changes only through a reviewed PR here.",
+    "Scope mirrors the Dependabot config this replaces: the Python project (pyproject.toml exact pins + uv.lock) and GitHub Actions. Lab image digests are handled by update-discovery.yml, not Renovate.",
+    "Never automerge (CONTRIBUTING.md, GOVERNANCE.md). Every commit carries a DCO sign-off matching Renovate's git author."
+  ],
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":gitSignOff"
+  ],
+  "enabledManagers": ["github-actions", "pep621"],
+  "platformCommit": "disabled",
+  "semanticCommits": "enabled",
+  "timezone": "Europe/Zurich",
+  "schedule": ["before 9am on monday"],
+  "labels": ["dependencies"],
+  "dependencyDashboard": true,
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 2,
+  "minimumReleaseAge": "3 days",
+  "internalChecksFilter": "strict",
+  "automerge": false,
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "addLabels": ["security"],
+    "schedule": ["at any time"],
+    "minimumReleaseAge": null,
+    "prCreation": "immediate",
+    "prConcurrentLimit": 0,
+    "prHourlyLimit": 0,
+    "automerge": false
+  },
+  "lockFileMaintenance": {
+    "enabled": false
+  },
+  "packageRules": [
+    {
+      "description": ["Digest/pin updates carry no upstream release date; the release-age wait applies to version updates only."],
+      "matchUpdateTypes": ["digest", "pin", "pinDigest"],
+      "minimumReleaseAge": null
+    },
+    {
+      "description": ["scripts/check_workflows.py fixes runners to ubuntu-24.04/ubuntu-latest and the Python matrix to 3.12/3.13: never propose runner or setup-action tool-version bumps."],
+      "matchManagers": ["github-actions"],
+      "matchDepTypes": ["github-runner", "uses-with"],
+      "enabled": false
+    },
+    {
+      "description": ["One PR for all GitHub Actions bumps (same as Dependabot's github-actions group). Each needs the matching TRUSTED_ACTIONS edit in scripts/check_workflows.py before CI passes."],
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin", "pinDigest"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": ["Development dependencies in one PR (same as Dependabot's controller-development group). requirements-dev.lock and requirements-runtime.lock must be re-exported from uv.lock by hand (CONTRIBUTING.md)."],
+      "matchManagers": ["pep621"],
+      "matchDepTypes": ["project.optional-dependencies", "dependency-groups"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "controller-development"
+    },
+    {
+      "description": ["Majors stay one PR per dependency."],
+      "matchUpdateTypes": ["major"],
+      "addLabels": ["major"]
+    }
+  ]
+}

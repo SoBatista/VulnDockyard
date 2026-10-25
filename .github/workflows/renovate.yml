@@ -1,0 +1,53 @@
+name: Renovate
+
+# Deterministic dependency-update PRs (same pattern as Lou-Lou-CH/lou-lou and
+# sobatista-vulnerable-apis/base-project). The full policy lives inline in renovate.json
+# (no shared preset: this repo's bot behaviour changes only through a PR here).
+#
+# Uses a PAT (RENOVATE_TOKEN), not GITHUB_TOKEN, so the PRs it opens trigger this
+# repo's own CI like any other PR (GITHUB_TOKEN-authored PRs do not trigger
+# workflows). Without the secret the job is a no-op notice, never a failure.
+#
+# Runs every 6 hours so security PRs (vulnerabilityAlerts, "at any time") are not
+# held back a week. Nothing automerges; routine PRs are still limited to the Monday-
+# morning window by the `schedule` in renovate.json.
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# One run at a time; a manual run waits for the scheduled one instead of racing it.
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+jobs:
+  renovate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check for RENOVATE_TOKEN
+        id: check
+        env:
+          RENOVATE_TOKEN: ${{ secrets.RENOVATE_TOKEN }}
+        run: |
+          if [ -n "$RENOVATE_TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::RENOVATE_TOKEN not set, skipping. Needs a fine-grained PAT on this repo with contents, pull-requests, issues, workflows and commit-statuses write, plus Dependabot alerts read."
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: renovatebot/github-action@e09d604f8f803bb527bd8321ed5be06c460b8682 # v46.2.2
+        if: steps.check.outputs.has_token == 'true'
+        with:
+          token: ${{ secrets.RENOVATE_TOKEN }}
+        env:
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+          RENOVATE_ONBOARDING: 'false'
+          RENOVATE_REQUIRE_CONFIG: required
+          LOG_LEVEL: info
